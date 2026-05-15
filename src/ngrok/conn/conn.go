@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	vhost "github.com/inconshreveable/go-vhost"
 	"io"
 	"math/rand"
 	"net"
@@ -36,11 +35,10 @@ type Listener struct {
 	Conns chan *loggedConn
 }
 
+const listenerBacklog = 128
+
 func wrapConn(conn net.Conn, typ string) *loggedConn {
 	switch c := conn.(type) {
-	case *vhost.HTTPConn:
-		wrapped := c.Conn.(*loggedConn)
-		return &loggedConn{wrapped.tcp, conn, wrapped.Logger, wrapped.id, wrapped.typ}
 	case *loggedConn:
 		return c
 	case *net.TCPConn:
@@ -61,7 +59,7 @@ func Listen(addr, typ string, tlsCfg *tls.Config) (l *Listener, err error) {
 
 	l = &Listener{
 		Addr:  listener.Addr(),
-		Conns: make(chan *loggedConn),
+		Conns: make(chan *loggedConn, listenerBacklog),
 	}
 
 	go func() {
@@ -77,7 +75,12 @@ func Listen(addr, typ string, tlsCfg *tls.Config) (l *Listener, err error) {
 				c.Conn = tls.Server(c.Conn, tlsCfg)
 			}
 			c.Info("New connection from %v", c.RemoteAddr())
-			l.Conns <- c
+			select {
+			case l.Conns <- c:
+			default:
+				c.Warn("Connection backlog is full, closing %s", c.RemoteAddr())
+				c.Close()
+			}
 		}
 	}()
 	return

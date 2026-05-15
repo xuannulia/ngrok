@@ -1,10 +1,39 @@
 *.swp
+.DS_Store
 bin/
 pkg/
 src/code.google.com
-src/github.com
 src/bitbucket.org
 src/launchpad.net
-src/gopkg.in
-src/ngrok/client/assets/
-src/ngrok/server/assets/
+
+# Local runtime/test artifacts
+test-site/
+tmp/
+*.log
+*.pid
+*.sock
+*.zip
+*.tar
+*.tar.gz
+
+# Real deployment configuration and secrets. Keep *.example files tracked.
+*.env
+*.local
+*.conf
+*.yml
+*.yaml
+!*.example
+!*.example.*
+!deploy/**/*.conf
+!deploy/**/*.yml.example
+
+# TLS/private key material. The repository keeps historical snakeoil test
+# certificates under assets/ for compatibility, but real certs should stay out.
+*.pem
+*.key
+*.p12
+*.pfx
+*.csr
+*.srl
+!assets/server/tls/snakeoil.key
+!src/ngrok/server/assets/assets/server/tls/snakeoil.key

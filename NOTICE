@@ -1,0 +1,14 @@
+ngrok v1 self-hosted fork
+
+This product includes software derived from ngrok v1.
+
+Original work:
+Copyright 2013 Alan Shreve
+
+Modifications:
+Copyright 2026 ngrok v1 self-hosted fork contributors
+
+This product includes third-party components. See THIRD_PARTY_NOTICES.md for
+component notices that apply to source and binary redistributions.
+
+See MODIFICATIONS.md for a summary of changes made in this derivative work.

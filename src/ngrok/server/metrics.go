@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	gometrics "github.com/rcrowley/go-metrics"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"ngrok/conn"
 	"ngrok/log"
+	ngmetrics "ngrok/metrics"
 	"os"
 	"time"
 )
@@ -36,26 +36,26 @@ type Metrics interface {
 type LocalMetrics struct {
 	log.Logger
 	reportInterval time.Duration
-	windowsCounter gometrics.Counter
-	linuxCounter   gometrics.Counter
-	osxCounter     gometrics.Counter
-	otherCounter   gometrics.Counter
+	windowsCounter ngmetrics.Counter
+	linuxCounter   ngmetrics.Counter
+	osxCounter     ngmetrics.Counter
+	otherCounter   ngmetrics.Counter
 
-	tunnelMeter        gometrics.Meter
-	tcpTunnelMeter     gometrics.Meter
-	httpTunnelMeter    gometrics.Meter
-	connMeter          gometrics.Meter
-	lostHeartbeatMeter gometrics.Meter
+	tunnelMeter        ngmetrics.Meter
+	tcpTunnelMeter     ngmetrics.Meter
+	httpTunnelMeter    ngmetrics.Meter
+	connMeter          ngmetrics.Meter
+	lostHeartbeatMeter ngmetrics.Meter
 
-	connTimer gometrics.Timer
+	connTimer ngmetrics.Timer
 
-	bytesInCount  gometrics.Counter
-	bytesOutCount gometrics.Counter
+	bytesInCount  ngmetrics.Counter
+	bytesOutCount ngmetrics.Counter
 
 	/*
-	   tunnelGauge gometrics.Gauge
-	   tcpTunnelGauge gometrics.Gauge
-	   connGauge gometrics.Gauge
+	   tunnelGauge ngmetrics.Gauge
+	   tcpTunnelGauge ngmetrics.Gauge
+	   connGauge ngmetrics.Gauge
 	*/
 }
 
@@ -63,26 +63,26 @@ func NewLocalMetrics(reportInterval time.Duration) *LocalMetrics {
 	metrics := LocalMetrics{
 		Logger:         log.NewPrefixLogger("metrics"),
 		reportInterval: reportInterval,
-		windowsCounter: gometrics.NewCounter(),
-		linuxCounter:   gometrics.NewCounter(),
-		osxCounter:     gometrics.NewCounter(),
-		otherCounter:   gometrics.NewCounter(),
+		windowsCounter: ngmetrics.NewCounter(),
+		linuxCounter:   ngmetrics.NewCounter(),
+		osxCounter:     ngmetrics.NewCounter(),
+		otherCounter:   ngmetrics.NewCounter(),
 
-		tunnelMeter:        gometrics.NewMeter(),
-		tcpTunnelMeter:     gometrics.NewMeter(),
-		httpTunnelMeter:    gometrics.NewMeter(),
-		connMeter:          gometrics.NewMeter(),
-		lostHeartbeatMeter: gometrics.NewMeter(),
+		tunnelMeter:        ngmetrics.NewMeter(),
+		tcpTunnelMeter:     ngmetrics.NewMeter(),
+		httpTunnelMeter:    ngmetrics.NewMeter(),
+		connMeter:          ngmetrics.NewMeter(),
+		lostHeartbeatMeter: ngmetrics.NewMeter(),
 
-		connTimer: gometrics.NewTimer(),
+		connTimer: ngmetrics.NewTimer(),
 
-		bytesInCount:  gometrics.NewCounter(),
-		bytesOutCount: gometrics.NewCounter(),
+		bytesInCount:  ngmetrics.NewCounter(),
+		bytesOutCount: ngmetrics.NewCounter(),
 
 		/*
-		   metrics.tunnelGauge = gometrics.NewGauge(),
-		   metrics.tcpTunnelGauge = gometrics.NewGauge(),
-		   metrics.connGauge = gometrics.NewGauge(),
+		   metrics.tunnelGauge = ngmetrics.NewGauge(),
+		   metrics.tcpTunnelGauge = ngmetrics.NewGauge(),
+		   metrics.connGauge = ngmetrics.NewGauge(),
 		*/
 	}
 
@@ -241,7 +241,7 @@ func (k *KeenIoMetrics) AuthedRequest(method, path string, body *bytes.Reader) (
 		k.Info("keen.io processed request in %f sec", time.Since(requestStartAt).Seconds())
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			bytes, _ := ioutil.ReadAll(resp.Body)
+			bytes, _ := io.ReadAll(resp.Body)
 			k.Error("Got %v response from keen.io: %s", resp.StatusCode, bytes)
 		}
 	}
@@ -259,7 +259,6 @@ func (k *KeenIoMetrics) CloseConnection(t *Tunnel, c conn.Conn, start time.Time,
 		ClientId           string
 		Protocol           string
 		Url                string
-		User               string
 		Version            string
 		Reason             string
 		HttpAuth           bool
@@ -276,7 +275,6 @@ func (k *KeenIoMetrics) CloseConnection(t *Tunnel, c conn.Conn, start time.Time,
 		ClientId:           t.ctl.id,
 		Protocol:           t.req.Protocol,
 		Url:                t.url,
-		User:               t.ctl.auth.User,
 		Version:            t.ctl.auth.MmVersion,
 		HttpAuth:           t.req.HttpAuth != "",
 		Subdomain:          t.req.Subdomain != "",
@@ -303,7 +301,6 @@ func (k *KeenIoMetrics) CloseTunnel(t *Tunnel) {
 		ClientId  string
 		Protocol  string
 		Url       string
-		User      string
 		Version   string
 		Reason    string
 		Duration  float64
@@ -317,7 +314,6 @@ func (k *KeenIoMetrics) CloseTunnel(t *Tunnel) {
 		ClientId: t.ctl.id,
 		Protocol: t.req.Protocol,
 		Url:      t.url,
-		User:     t.ctl.auth.User,
 		Version:  t.ctl.auth.MmVersion,
 		//Reason: reason,
 		Duration:  time.Since(t.start).Seconds(),

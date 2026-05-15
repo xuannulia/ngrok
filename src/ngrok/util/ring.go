@@ -24,7 +24,7 @@ func (r *Ring) Add(item interface{}) interface{} {
 
 	// remove old item if at capacity
 	var old interface{}
-	if r.Len() >= r.capacity {
+	if r.Len() > r.capacity {
 		old = r.Remove(r.Back())
 	}
 

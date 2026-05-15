@@ -1,11 +1,9 @@
-// +build !release,!autoupdate
-
 package client
 
 import (
 	"ngrok/client/mvc"
 )
 
-// no auto-updating in debug mode
+// Self-managed forks do not use the legacy Equinox auto-update service.
 func autoUpdate(state mvc.State, token string) {
 }

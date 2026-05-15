@@ -16,14 +16,25 @@ There are Makefile targets for compiling just the client or server.
     make client
     make server
 
-**NB: You must compile with Go 1.1+! You must have Mercurial SCM Installed.**
+**NB: This fork requires Go 1.16+ because static assets are embedded with the
+standard library `embed` package.**
+
+### Vendored dependencies
+This fork vendors the historical GOPATH dependencies under `src/github.com` and
+`src/gopkg.in`. The original upstream build downloaded dependencies dynamically
+with `go get`, but several of those old import paths are unreliable to restore
+on modern Go installations and restricted networks.
+
+The Makefile forces `GO111MODULE=off` and builds from the vendored dependency
+tree, so `make client`, `make server`, and `make all` do not need to fetch Go
+packages from the network. Static assets are embedded by Go itself; the legacy
+`go-bindata` tool is no longer used.
 
 ### Compiling release versions
-Both the client and the server contain static asset files.
-These include TLS/SSL certificates and the html/css/js for the client's web interface.
-The release versions embed all of this data into the binaries themselves, whereas the debug versions read these files from the filesystem.
-
-*You should always develop on debug versions so that you don't have to recompile when testing changes in the static assets.*
+Both the client and the server contain static asset files. These include TLS/SSL
+certificates and the html/css/js for the client's web interface. Assets are
+embedded into the binaries from `src/ngrok/client/assets/assets` and
+`src/ngrok/server/assets/assets`.
 
 There are Makefile targets for compiling the client and server for releases:
 
@@ -42,7 +53,7 @@ Add the following lines to /etc/hosts:
 
 Run ngrokd with the following options:
 
-    ./bin/ngrokd -domain ngrok.me
+    ./bin/ngrokd -domain ngrok.me -authToken dev-token
 
 Create an ngrok configuration file, "debug.yml" with the following contents:
 

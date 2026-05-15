@@ -15,6 +15,7 @@ import (
 	"ngrok/proto"
 	"ngrok/util"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -33,6 +34,7 @@ type SerializedBody struct {
 	ContentType    string
 	Text           string
 	Length         int
+	Truncated      bool
 	Error          string
 	ErrorOffset    int
 	Form           url.Values
@@ -64,6 +66,7 @@ type WebHttpView struct {
 	state        chan SerializedUiState
 	HttpRequests *util.Ring
 	idToTxn      map[string]*SerializedTxn
+	idToTxnLock  sync.RWMutex
 }
 
 type SerializedUiState struct {
@@ -90,12 +93,13 @@ func newWebHttpView(ctl mvc.Controller, wv *WebView, proto *proto.Http) *WebHttp
 }
 
 type XMLDoc struct {
-	data []byte `xml:",innerxml"`
+	Data []byte `xml:",innerxml"`
 }
 
-func makeBody(h http.Header, body []byte) SerializedBody {
+func makeBody(h http.Header, body []byte, truncated bool) SerializedBody {
 	b := SerializedBody{
 		Length:      len(body),
+		Truncated:   truncated,
 		Text:        base64.StdEncoding.EncodeToString(body),
 		ErrorOffset: -1,
 	}
@@ -154,13 +158,13 @@ func (whv *WebHttpView) updateHttp() {
 		// we haven't processed this transaction yet if we haven't set the
 		// user data
 		if htxn.UserCtx == nil {
-			rawReq, err := proto.DumpRequestOut(htxn.Req.Request, true)
+			rawReq, err := proto.DumpRequestOut(htxn.Req.Request, !htxn.Req.BodyTruncated)
 			if err != nil {
 				whv.Error("Failed to dump request: %v", err)
 				continue
 			}
 
-			body := makeBody(htxn.Req.Header, htxn.Req.BodyBytes)
+			body := makeBody(htxn.Req.Header, htxn.Req.BodyBytes, htxn.Req.BodyTruncated)
 			whtxn := &SerializedTxn{
 				Id:      util.RandId(8),
 				HttpTxn: htxn,
@@ -177,19 +181,21 @@ func (whv *WebHttpView) updateHttp() {
 			}
 
 			htxn.UserCtx = whtxn
-			// XXX: unsafe map access from multiple go routines
+			whv.idToTxnLock.Lock()
 			whv.idToTxn[whtxn.Id] = whtxn
-			// XXX: use return value to delete from map so we don't leak memory
-			whv.HttpRequests.Add(whtxn)
+			if old, ok := whv.HttpRequests.Add(whtxn).(*SerializedTxn); ok {
+				delete(whv.idToTxn, old.Id)
+			}
+			whv.idToTxnLock.Unlock()
 		} else {
-			rawResp, err := httputil.DumpResponse(htxn.Resp.Response, true)
+			rawResp, err := httputil.DumpResponse(htxn.Resp.Response, !htxn.Resp.BodyTruncated)
 			if err != nil {
 				whv.Error("Failed to dump response: %v", err)
 				continue
 			}
 
 			txn := htxn.UserCtx.(*SerializedTxn)
-			body := makeBody(htxn.Resp.Header, htxn.Resp.BodyBytes)
+			body := makeBody(htxn.Resp.Header, htxn.Resp.BodyBytes, htxn.Resp.BodyTruncated)
 			txn.Duration = htxn.Duration.Nanoseconds()
 			txn.Resp = SerializedResponse{
 				Status: htxn.Resp.Status,
@@ -210,6 +216,9 @@ func (whv *WebHttpView) updateHttp() {
 
 func (whv *WebHttpView) register() {
 	http.HandleFunc("/http/in/replay", func(w http.ResponseWriter, r *http.Request) {
+		if !whv.webview.authorized(w, r) {
+			return
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				err := util.MakePanicTrace(r)
@@ -220,7 +229,10 @@ func (whv *WebHttpView) register() {
 
 		r.ParseForm()
 		txnid := r.Form.Get("txnid")
-		if txn, ok := whv.idToTxn[txnid]; ok {
+		whv.idToTxnLock.RLock()
+		txn, ok := whv.idToTxn[txnid]
+		whv.idToTxnLock.RUnlock()
+		if ok {
 			reqBytes, err := base64.StdEncoding.DecodeString(txn.Req.Raw)
 			if err != nil {
 				panic(err)
@@ -233,6 +245,9 @@ func (whv *WebHttpView) register() {
 	})
 
 	http.HandleFunc("/http/in", func(w http.ResponseWriter, r *http.Request) {
+		if !whv.webview.authorized(w, r) {
+			return
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				err := util.MakePanicTrace(r)

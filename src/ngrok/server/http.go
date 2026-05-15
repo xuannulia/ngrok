@@ -1,15 +1,34 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
-	vhost "github.com/inconshreveable/go-vhost"
-	//"net"
+	"io"
+	"net/http"
 	"ngrok/conn"
 	"ngrok/log"
 	"strings"
 	"time"
 )
+
+type replayConn struct {
+	conn.Conn
+	reader io.Reader
+}
+
+func newReplayConn(c conn.Conn, replay []byte) conn.Conn {
+	return &replayConn{
+		Conn:   c,
+		reader: io.MultiReader(bytes.NewReader(replay), c),
+	}
+}
+
+func (c *replayConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
 
 const (
 	NotAuthorized = `HTTP/1.0 401 Not Authorized
@@ -47,8 +66,14 @@ func startHttpListener(addr string, tlsCfg *tls.Config) (listener *conn.Listener
 
 	log.Info("Listening for public %s connections on %v", proto, listener.Addr.String())
 	go func() {
-		for conn := range listener.Conns {
-			go httpHandler(conn, proto)
+		for c := range listener.Conns {
+			if !acquireConnSlot(c) {
+				continue
+			}
+			go func(c conn.Conn) {
+				defer releaseConnSlot()
+				httpHandler(c, proto)
+			}(c)
 		}
 	}()
 
@@ -68,23 +93,21 @@ func httpHandler(c conn.Conn, proto string) {
 	// Make sure we detect dead connections while we decide how to multiplex
 	c.SetDeadline(time.Now().Add(connReadTimeout))
 
-	// multiplex by extracting the Host header, the vhost library
-	vhostConn, err := vhost.HTTP(c)
+	var replay bytes.Buffer
+	req, err := http.ReadRequest(bufio.NewReader(io.TeeReader(c, &replay)))
 	if err != nil {
 		c.Warn("Failed to read valid %s request: %v", proto, err)
 		c.Write([]byte(BadRequest))
 		return
 	}
+	req.Body.Close()
 
 	// read out the Host header and auth from the request
-	host := strings.ToLower(vhostConn.Host())
-	auth := vhostConn.Request.Header.Get("Authorization")
-
-	// done reading mux data, free up the request memory
-	vhostConn.Free()
+	host := strings.ToLower(req.Host)
+	auth := req.Header.Get("Authorization")
 
 	// We need to read from the vhost conn now since it mucked around reading the stream
-	c = conn.Wrap(vhostConn, "pub")
+	c = newReplayConn(c, replay.Bytes())
 
 	// multiplex to find the right backend host
 	c.Debug("Found hostname %s in request", host)
@@ -98,8 +121,8 @@ func httpHandler(c conn.Conn, proto string) {
 	// If the client specified http auth and it doesn't match this request's auth
 	// then fail the request with 401 Not Authorized and request the client reissue the
 	// request with basic authdeny the request
-	if tunnel.req.HttpAuth != "" && auth != tunnel.req.HttpAuth {
-		c.Info("Authentication failed: %s", auth)
+	if tunnel.req.HttpAuth != "" && subtle.ConstantTimeCompare([]byte(auth), []byte(tunnel.req.HttpAuth)) != 1 {
+		c.Info("Authentication failed")
 		c.Write([]byte(NotAuthorized))
 		return
 	}

@@ -34,7 +34,8 @@ type Tunnel struct {
 	start time.Time
 
 	// public url
-	url string
+	url  string
+	urls []string
 
 	// tcp listener
 	listener *net.TCPListener
@@ -49,47 +50,150 @@ type Tunnel struct {
 	closing int32
 }
 
+func (t *Tunnel) registerURL(url string) error {
+	if err := tunnelRegistry.Register(url, t); err != nil {
+		return err
+	}
+	t.urls = append(t.urls, url)
+	if t.url == "" {
+		t.url = url
+	}
+	return nil
+}
+
+func (t *Tunnel) registerAndCacheURL(url string) error {
+	if err := tunnelRegistry.RegisterAndCache(url, t); err != nil {
+		return err
+	}
+	t.urls = append(t.urls, url)
+	if t.url == "" {
+		t.url = url
+	}
+	return nil
+}
+
+func (t *Tunnel) unregisterURLs() {
+	for _, url := range t.urls {
+		tunnelRegistry.Del(url)
+	}
+	t.urls = nil
+}
+
 // Common functionality for registering virtually hosted protocols
 func registerVhost(t *Tunnel, protocol string, servingPort int) (err error) {
-	vhost := os.Getenv("VHOST")
-	if vhost == "" {
-		vhost = fmt.Sprintf("%s:%d", opts.domain, servingPort)
+	vhosts := publicVhosts(protocol, servingPort)
+	if len(vhosts) == 0 {
+		return fmt.Errorf("No domains configured")
 	}
 
-	// Canonicalize virtual host by removing default port (e.g. :80 on HTTP)
-	defaultPort, ok := defaultPortMap[protocol]
-	if !ok {
+	if _, ok := defaultPortMap[protocol]; !ok {
 		return fmt.Errorf("Couldn't find default port for protocol %s", protocol)
 	}
-
-	defaultPortSuffix := fmt.Sprintf(":%d", defaultPort)
-	if strings.HasSuffix(vhost, defaultPortSuffix) {
-		vhost = vhost[0 : len(vhost)-len(defaultPortSuffix)]
-	}
-
-	// Canonicalize by always using lower-case
-	vhost = strings.ToLower(vhost)
 
 	// Register for specific hostname
 	hostname := strings.ToLower(strings.TrimSpace(t.req.Hostname))
 	if hostname != "" {
-		t.url = fmt.Sprintf("%s://%s", protocol, hostname)
-		return tunnelRegistry.Register(t.url, t)
+		if !validHostname(hostname) {
+			return fmt.Errorf("Invalid hostname")
+		}
+		if !hostnameAllowed(hostname, vhosts) {
+			return fmt.Errorf("Hostname is outside the configured domains")
+		}
+		return t.registerURL(fmt.Sprintf("%s://%s", protocol, hostname))
 	}
 
 	// Register for specific subdomain
 	subdomain := strings.ToLower(strings.TrimSpace(t.req.Subdomain))
 	if subdomain != "" {
-		t.url = fmt.Sprintf("%s://%s.%s", protocol, subdomain, vhost)
-		return tunnelRegistry.Register(t.url, t)
+		if !validHostnameLabel(subdomain) {
+			return fmt.Errorf("Invalid subdomain")
+		}
+		return t.registerURL(fmt.Sprintf("%s://%s.%s", protocol, subdomain, vhosts[0]))
 	}
 
 	// Register for random URL
 	t.url, err = tunnelRegistry.RegisterRepeat(func() string {
-		return fmt.Sprintf("%s://%x.%s", protocol, rand.Int31(), vhost)
+		return fmt.Sprintf("%s://%x.%s", protocol, rand.Int31(), vhosts[0])
 	}, t)
+	if err == nil {
+		t.urls = append(t.urls, t.url)
+	}
 
 	return
+}
+
+func hostnameAllowed(hostname string, vhosts []string) bool {
+	for _, vhost := range vhosts {
+		vhost = stripHostPort(vhost)
+		if hostname == vhost || strings.HasSuffix(hostname, "."+vhost) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripHostPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func publicVhosts(protocol string, servingPort int) []string {
+	raw := os.Getenv("VHOST")
+	if raw == "" {
+		parts := make([]string, 0, len(domains))
+		for _, domain := range domains {
+			parts = append(parts, fmt.Sprintf("%s:%d", domain, servingPort))
+		}
+		raw = strings.Join(parts, ",")
+	}
+
+	defaultPort := defaultPortMap[protocol]
+	defaultPortSuffix := fmt.Sprintf(":%d", defaultPort)
+	result := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, item := range strings.Split(raw, ",") {
+		vhost := strings.ToLower(strings.TrimSpace(item))
+		if strings.HasSuffix(vhost, defaultPortSuffix) {
+			vhost = vhost[0 : len(vhost)-len(defaultPortSuffix)]
+		}
+		if vhost == "" || seen[vhost] {
+			continue
+		}
+		seen[vhost] = true
+		result = append(result, vhost)
+	}
+	return result
+}
+
+func validHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return false
+	}
+	labels := strings.Split(hostname, ".")
+	for _, label := range labels {
+		if !validHostnameLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validHostnameLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for _, ch := range label {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // Create a new tunnel from a registration message received
@@ -113,7 +217,7 @@ func NewTunnel(m *msg.ReqTunnel, ctl *Control) (t *Tunnel, err error) {
 
 			// create the url
 			addr := t.listener.Addr().(*net.TCPAddr)
-			t.url = fmt.Sprintf("tcp://%s:%d", opts.domain, addr.Port)
+			t.url = fmt.Sprintf("tcp://%s:%d", domains[0], addr.Port)
 
 			// register it
 			if err = tunnelRegistry.RegisterAndCache(t.url, t); err != nil {
@@ -123,6 +227,7 @@ func NewTunnel(m *msg.ReqTunnel, ctl *Control) (t *Tunnel, err error) {
 				err = fmt.Errorf("TCP listener bound, but failed to register %s", t.url)
 				return err
 			}
+			t.urls = append(t.urls, t.url)
 
 			go t.listenTcp(t.listener)
 			return nil
@@ -130,7 +235,11 @@ func NewTunnel(m *msg.ReqTunnel, ctl *Control) (t *Tunnel, err error) {
 
 		// use the custom remote port you asked for
 		if t.req.RemotePort != 0 {
-			bindTcp(int(t.req.RemotePort))
+			if !opts.allowRemotePorts {
+				err = fmt.Errorf("Custom TCP remote ports are disabled by the server")
+				return
+			}
+			err = bindTcp(int(t.req.RemotePort))
 			return
 		}
 
@@ -198,7 +307,7 @@ func (t *Tunnel) Shutdown() {
 	}
 
 	// remove ourselves from the tunnel registry
-	tunnelRegistry.Del(t.url)
+	t.unregisterURLs()
 
 	// let the control connection know we're shutting down
 	// currently, only the control connection shuts down tunnels,
@@ -237,8 +346,14 @@ func (t *Tunnel) listenTcp(listener *net.TCPListener) {
 		conn := conn.Wrap(tcpConn, "pub")
 		conn.AddLogPrefix(t.Id())
 		conn.Info("New connection from %v", conn.RemoteAddr())
+		if !acquireConnSlot(conn) {
+			continue
+		}
 
-		go t.HandlePublicConnection(conn)
+		go func() {
+			defer releaseConnSlot()
+			t.HandlePublicConnection(conn)
+		}()
 	}
 }
 

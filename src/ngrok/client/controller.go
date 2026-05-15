@@ -158,7 +158,7 @@ func (ctl *Controller) Run(config *Configuration) {
 	// init web ui
 	var webView *web.WebView
 	if config.InspectAddr != "disabled" {
-		webView = web.NewWebView(ctl, config.InspectAddr)
+		webView = web.NewWebView(ctl, config.InspectAddr, config.InspectAuth)
 		ctl.AddView(webView)
 	}
 

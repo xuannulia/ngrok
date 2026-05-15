@@ -3,7 +3,47 @@ package conn
 import (
 	"bufio"
 	"io"
+	"sync"
 )
+
+const teeBufferSize = 32
+
+type asyncPipeWriter struct {
+	pipe *io.PipeWriter
+	ch   chan []byte
+	once sync.Once
+}
+
+func newAsyncPipeWriter(pipe *io.PipeWriter) *asyncPipeWriter {
+	w := &asyncPipeWriter{
+		pipe: pipe,
+		ch:   make(chan []byte, teeBufferSize),
+	}
+	go func() {
+		for b := range w.ch {
+			if _, err := w.pipe.Write(b); err != nil {
+				return
+			}
+		}
+	}()
+	return w
+}
+
+func (w *asyncPipeWriter) Write(b []byte) {
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	select {
+	case w.ch <- cp:
+	default:
+	}
+}
+
+func (w *asyncPipeWriter) Close() {
+	w.once.Do(func() {
+		close(w.ch)
+		w.pipe.Close()
+	})
+}
 
 // conn.Tee is a wraps a conn.Conn
 // causing all writes/reads to be tee'd just
@@ -16,37 +56,33 @@ import (
 // over a connection without having to tamper with the actual
 // code that reads and writes over the connection
 //
-// NB: the data is Tee'd into a shared-memory io.Pipe which
-// has a limited (and small) buffer. If you are not consuming from
-// the ReadBuffer() and WriteBuffer(), you are going to block
-// your application's real traffic from flowing over the connection
+// NB: copied inspection data is best-effort. If consumers fall behind,
+// inspection bytes are dropped instead of blocking real traffic.
 
 type Tee struct {
-	rd       io.Reader
-	wr       io.Writer
 	readPipe struct {
 		rd *io.PipeReader
-		wr *io.PipeWriter
+		wr *asyncPipeWriter
 	}
 	writePipe struct {
 		rd *io.PipeReader
-		wr *io.PipeWriter
+		wr *asyncPipeWriter
 	}
 	Conn
 }
 
 func NewTee(conn Conn) *Tee {
 	c := &Tee{
-		rd:   nil,
-		wr:   nil,
 		Conn: conn,
 	}
 
-	c.readPipe.rd, c.readPipe.wr = io.Pipe()
-	c.writePipe.rd, c.writePipe.wr = io.Pipe()
+	var readPipeWriter *io.PipeWriter
+	var writePipeWriter *io.PipeWriter
+	c.readPipe.rd, readPipeWriter = io.Pipe()
+	c.writePipe.rd, writePipeWriter = io.Pipe()
 
-	c.rd = io.TeeReader(c.Conn, c.readPipe.wr)
-	c.wr = io.MultiWriter(c.Conn, c.writePipe.wr)
+	c.readPipe.wr = newAsyncPipeWriter(readPipeWriter)
+	c.writePipe.wr = newAsyncPipeWriter(writePipeWriter)
 	return c
 }
 
@@ -59,23 +95,21 @@ func (c *Tee) WriteBuffer() *bufio.Reader {
 }
 
 func (c *Tee) Read(b []byte) (n int, err error) {
-	n, err = c.rd.Read(b)
+	n, err = c.Conn.Read(b)
+	if n > 0 {
+		c.readPipe.wr.Write(b[:n])
+	}
 	if err != nil {
 		c.readPipe.wr.Close()
 	}
 	return
 }
 
-func (c *Tee) ReadFrom(r io.Reader) (n int64, err error) {
-	n, err = io.Copy(c.wr, r)
-	if err != nil {
-		c.writePipe.wr.Close()
-	}
-	return
-}
-
 func (c *Tee) Write(b []byte) (n int, err error) {
-	n, err = c.wr.Write(b)
+	n, err = c.Conn.Write(b)
+	if n > 0 {
+		c.writePipe.wr.Write(b[:n])
+	}
 	if err != nil {
 		c.writePipe.wr.Close()
 	}

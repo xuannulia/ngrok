@@ -1,13 +1,6 @@
 package client
 
-import (
-	metrics "github.com/rcrowley/go-metrics"
-)
-
-const (
-	sampleSize  int     = 1028
-	sampleAlpha float64 = 0.015
-)
+import "ngrok/metrics"
 
 type ClientMetrics struct {
 	// metrics
@@ -27,8 +20,8 @@ func NewClientMetrics() *ClientMetrics {
 		connMeter:       metrics.NewMeter(),
 		connTimer:       metrics.NewTimer(),
 		proxySetupTimer: metrics.NewTimer(),
-		bytesIn:         metrics.NewHistogram(metrics.NewExpDecaySample(sampleSize, sampleAlpha)),
-		bytesOut:        metrics.NewHistogram(metrics.NewExpDecaySample(sampleSize, sampleAlpha)),
+		bytesIn:         metrics.NewHistogram(),
+		bytesOut:        metrics.NewHistogram(),
 		bytesInCount:    metrics.NewCounter(),
 		bytesOutCount:   metrics.NewCounter(),
 	}

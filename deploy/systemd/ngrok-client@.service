@@ -1,0 +1,22 @@
+[Unit]
+Description=ngrok client tunnels from /etc/ngrok/%i.yml
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ngrok
+Group=ngrok
+ExecStart=/usr/local/bin/ngrok -config=/etc/ngrok/%i.yml -log=stdout start-all
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/ngrok
+
+[Install]
+WantedBy=multi-user.target

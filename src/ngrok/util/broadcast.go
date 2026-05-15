@@ -1,5 +1,7 @@
 package util
 
+const broadcastListenerBuffer = 16
+
 type Broadcast struct {
 	listeners []chan interface{}
 	reg       chan (chan interface{})
@@ -35,7 +37,12 @@ func NewBroadcast() *Broadcast {
 
 			case item := <-b.in:
 				for _, l := range b.listeners {
-					l <- item
+					select {
+					case l <- item:
+					default:
+						// Drop updates for slow listeners instead of blocking
+						// traffic or controller goroutines behind them.
+					}
 				}
 			}
 		}
@@ -49,7 +56,7 @@ func (b *Broadcast) In() chan interface{} {
 }
 
 func (b *Broadcast) Reg() chan interface{} {
-	listener := make(chan interface{})
+	listener := make(chan interface{}, broadcastListenerBuffer)
 	b.reg <- listener
 	return listener
 }

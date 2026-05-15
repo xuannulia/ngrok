@@ -1,9 +1,8 @@
 package client
 
 import (
+	"bufio"
 	"fmt"
-	"gopkg.in/yaml.v1"
-	"io/ioutil"
 	"net"
 	"net/url"
 	"ngrok/log"
@@ -19,6 +18,7 @@ type Configuration struct {
 	HttpProxy          string                          `yaml:"http_proxy,omitempty"`
 	ServerAddr         string                          `yaml:"server_addr,omitempty"`
 	InspectAddr        string                          `yaml:"inspect_addr,omitempty"`
+	InspectAuth        string                          `yaml:"inspect_auth,omitempty"`
 	TrustHostRootCerts bool                            `yaml:"trust_host_root_certs,omitempty"`
 	AuthToken          string                          `yaml:"auth_token,omitempty"`
 	Tunnels            map[string]*TunnelConfiguration `yaml:"tunnels,omitempty"`
@@ -41,7 +41,7 @@ func LoadConfiguration(opts *Options) (config *Configuration, err error) {
 	}
 
 	log.Info("Reading configuration file %s", configPath)
-	configBuf, err := ioutil.ReadFile(configPath)
+	configBuf, err := os.ReadFile(configPath)
 	if err != nil {
 		// failure to read a configuration file is only a fatal error if
 		// the user specified one explicitly
@@ -51,9 +51,8 @@ func LoadConfiguration(opts *Options) (config *Configuration, err error) {
 		}
 	}
 
-	// deserialize/parse the config
 	config = new(Configuration)
-	if err = yaml.Unmarshal(configBuf, &config); err != nil {
+	if err = parseConfiguration(configBuf, config); err != nil {
 		err = fmt.Errorf("Error parsing configuration file %s: %v", configPath, err)
 		return
 	}
@@ -84,6 +83,12 @@ func LoadConfiguration(opts *Options) (config *Configuration, err error) {
 	if config.InspectAddr != "disabled" {
 		if config.InspectAddr, err = normalizeAddress(config.InspectAddr, "inspect_addr"); err != nil {
 			return
+		}
+		if config.InspectAuth == "" {
+			if config.InspectAuth = opts.inspectauth; config.InspectAuth == "" && !isLoopbackAddress(config.InspectAddr) {
+				err = fmt.Errorf("inspect_addr %s is not loopback; set inspect_auth or use inspect_addr: disabled", config.InspectAddr)
+				return
+			}
 		}
 	}
 
@@ -201,6 +206,15 @@ func LoadConfiguration(opts *Options) (config *Configuration, err error) {
 	return
 }
 
+func isLoopbackAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func defaultPath() string {
 	user, err := user.Current()
 
@@ -249,10 +263,10 @@ func SaveAuthToken(configPath, authtoken string) (err error) {
 	c := new(Configuration)
 
 	// read the configuration
-	oldConfigBytes, err := ioutil.ReadFile(configPath)
+	oldConfigBytes, err := os.ReadFile(configPath)
 	if err == nil {
 		// unmarshal if we successfully read the configuration file
-		if err = yaml.Unmarshal(oldConfigBytes, c); err != nil {
+		if err = parseConfiguration(oldConfigBytes, c); err != nil {
 			return
 		}
 	}
@@ -266,11 +280,174 @@ func SaveAuthToken(configPath, authtoken string) (err error) {
 	c.AuthToken = authtoken
 
 	// rewrite configuration
-	newConfigBytes, err := yaml.Marshal(c)
-	if err != nil {
-		return
+	newConfigBytes := []byte(formatConfiguration(c))
+	err = os.WriteFile(configPath, newConfigBytes, 0600)
+	return
+}
+
+func parseConfiguration(data []byte, config *Configuration) error {
+	if config.Tunnels == nil {
+		config.Tunnels = make(map[string]*TunnelConfiguration)
 	}
 
-	err = ioutil.WriteFile(configPath, newConfigBytes, 0600)
-	return
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	var section string
+	var currentTunnel *TunnelConfiguration
+	var inProto bool
+
+	for lineNo := 1; scanner.Scan(); lineNo++ {
+		raw := stripComment(scanner.Text())
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+
+		indent := leadingSpaces(raw)
+		key, value, ok := splitKeyValue(strings.TrimSpace(raw))
+		if !ok {
+			return fmt.Errorf("line %d: expected key: value", lineNo)
+		}
+
+		switch indent {
+		case 0:
+			section = ""
+			currentTunnel = nil
+			inProto = false
+			switch key {
+			case "http_proxy":
+				config.HttpProxy = value
+			case "server_addr":
+				config.ServerAddr = value
+			case "inspect_addr":
+				config.InspectAddr = value
+			case "inspect_auth":
+				config.InspectAuth = value
+			case "trust_host_root_certs":
+				config.TrustHostRootCerts = parseBool(value)
+			case "auth_token":
+				config.AuthToken = value
+			case "tunnels":
+				section = "tunnels"
+			default:
+				return fmt.Errorf("line %d: unknown config key %q", lineNo, key)
+			}
+
+		case 2:
+			if section != "tunnels" {
+				return fmt.Errorf("line %d: unexpected nested key %q", lineNo, key)
+			}
+			inProto = false
+			currentTunnel = &TunnelConfiguration{Protocols: make(map[string]string)}
+			config.Tunnels[key] = currentTunnel
+
+		case 4:
+			if currentTunnel == nil {
+				return fmt.Errorf("line %d: tunnel option without tunnel", lineNo)
+			}
+			inProto = false
+			switch key {
+			case "subdomain":
+				currentTunnel.Subdomain = value
+			case "hostname":
+				currentTunnel.Hostname = value
+			case "auth":
+				currentTunnel.HttpAuth = value
+			case "remote_port":
+				port, err := strconv.ParseUint(value, 10, 16)
+				if err != nil {
+					return fmt.Errorf("line %d: invalid remote_port", lineNo)
+				}
+				currentTunnel.RemotePort = uint16(port)
+			case "proto":
+				inProto = true
+			default:
+				return fmt.Errorf("line %d: unknown tunnel key %q", lineNo, key)
+			}
+
+		case 6:
+			if currentTunnel == nil || !inProto {
+				return fmt.Errorf("line %d: protocol without proto section", lineNo)
+			}
+			currentTunnel.Protocols[key] = value
+
+		default:
+			return fmt.Errorf("line %d: unsupported indentation", lineNo)
+		}
+	}
+
+	return scanner.Err()
+}
+
+func stripComment(line string) string {
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func leadingSpaces(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+func splitKeyValue(line string) (key string, value string, ok bool) {
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(parts[0])
+	value = strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+	return key, value, key != ""
+}
+
+func parseBool(value string) bool {
+	switch strings.ToLower(value) {
+	case "true", "yes", "1", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatConfiguration(c *Configuration) string {
+	var b strings.Builder
+	writeString := func(key, value string) {
+		if value != "" {
+			fmt.Fprintf(&b, "%s: %s\n", key, value)
+		}
+	}
+
+	writeString("http_proxy", c.HttpProxy)
+	writeString("server_addr", c.ServerAddr)
+	writeString("inspect_addr", c.InspectAddr)
+	writeString("inspect_auth", c.InspectAuth)
+	if c.TrustHostRootCerts {
+		b.WriteString("trust_host_root_certs: true\n")
+	}
+	writeString("auth_token", c.AuthToken)
+
+	if len(c.Tunnels) > 0 {
+		b.WriteString("tunnels:\n")
+		for name, tunnel := range c.Tunnels {
+			fmt.Fprintf(&b, "  %s:\n", name)
+			writeTunnelString(&b, "subdomain", tunnel.Subdomain)
+			writeTunnelString(&b, "hostname", tunnel.Hostname)
+			writeTunnelString(&b, "auth", tunnel.HttpAuth)
+			if tunnel.RemotePort != 0 {
+				fmt.Fprintf(&b, "    remote_port: %d\n", tunnel.RemotePort)
+			}
+			if len(tunnel.Protocols) > 0 {
+				b.WriteString("    proto:\n")
+				for proto, addr := range tunnel.Protocols {
+					fmt.Fprintf(&b, "      %s: %s\n", proto, addr)
+				}
+			}
+		}
+	}
+
+	return b.String()
+}
+
+func writeTunnelString(b *strings.Builder, key, value string) {
+	if value != "" {
+		fmt.Fprintf(b, "    %s: %s\n", key, value)
+	}
 }

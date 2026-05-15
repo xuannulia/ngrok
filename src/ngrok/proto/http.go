@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"ngrok/conn"
 	"ngrok/util"
@@ -15,17 +13,21 @@ import (
 	"sync"
 	"time"
 
-	metrics "github.com/rcrowley/go-metrics"
+	"ngrok/metrics"
 )
+
+const maxInspectBodyBytes = 1024 * 1024
 
 type HttpRequest struct {
 	*http.Request
-	BodyBytes []byte
+	BodyBytes     []byte
+	BodyTruncated bool
 }
 
 type HttpResponse struct {
 	*http.Response
-	BodyBytes []byte
+	BodyBytes     []byte
+	BodyTruncated bool
 }
 
 type HttpTxn struct {
@@ -53,10 +55,21 @@ func NewHttp() *Http {
 	}
 }
 
-func extractBody(r io.Reader) ([]byte, io.ReadCloser, error) {
-	buf := new(bytes.Buffer)
-	_, err := buf.ReadFrom(r)
-	return buf.Bytes(), ioutil.NopCloser(buf), err
+func extractBody(r io.Reader) ([]byte, bool, io.ReadCloser, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxInspectBodyBytes+1))
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	truncated := len(body) > maxInspectBodyBytes
+	if truncated {
+		body = body[:maxInspectBodyBytes]
+		if _, err = io.Copy(io.Discard, r); err != nil {
+			return nil, false, nil, err
+		}
+	}
+
+	return body, truncated, io.NopCloser(bytes.NewReader(body)), nil
 }
 
 func (h *Http) GetName() string { return "http" }
@@ -79,14 +92,7 @@ func (h *Http) readRequests(tee *conn.Tee, lastTxn chan *HttpTxn, connCtx interf
 			break
 		}
 
-		// make sure we read the body of the request so that
-		// we don't block the writer
-		_, err = httputil.DumpRequest(req, true)
-
 		h.reqMeter.Mark(1)
-		if err != nil {
-			tee.Warn("Failed to extract request body: %v", err)
-		}
 
 		// golang's ReadRequest/DumpRequestOut is broken. Fix up the request so it works later
 		req.URL.Scheme = "http"
@@ -95,7 +101,7 @@ func (h *Http) readRequests(tee *conn.Tee, lastTxn chan *HttpTxn, connCtx interf
 		txn := &HttpTxn{Start: time.Now(), ConnUserCtx: connCtx}
 		txn.Req = &HttpRequest{Request: req}
 		if req.Body != nil {
-			txn.Req.BodyBytes, txn.Req.Body, err = extractBody(req.Body)
+			txn.Req.BodyBytes, txn.Req.BodyTruncated, txn.Req.Body, err = extractBody(req.Body)
 			if err != nil {
 				tee.Warn("Failed to extract request body: %v", err)
 			}
@@ -116,14 +122,10 @@ func (h *Http) readResponses(tee *conn.Tee, lastTxn chan *HttpTxn) {
 			// no more responses to be read, we're done
 			break
 		}
-		// make sure we read the body of the response so that
-		// we don't block the reader
-		_, _ = httputil.DumpResponse(resp, true)
-
 		txn.Resp = &HttpResponse{Response: resp}
 		// apparently, Body can be nil in some cases
 		if resp.Body != nil {
-			txn.Resp.BodyBytes, txn.Resp.Body, err = extractBody(resp.Body)
+			txn.Resp.BodyBytes, txn.Resp.BodyTruncated, txn.Resp.Body, err = extractBody(resp.Body)
 			if err != nil {
 				tee.Warn("Failed to extract response body: %v", err)
 			}
@@ -142,12 +144,12 @@ func (h *Http) readResponses(tee *conn.Tee, lastTxn chan *HttpTxn) {
 			// sending bytes to each other
 			wg.Add(2)
 			go func() {
-				ioutil.ReadAll(tee.WriteBuffer())
+				io.ReadAll(tee.WriteBuffer())
 				wg.Done()
 			}()
 
 			go func() {
-				ioutil.ReadAll(tee.ReadBuffer())
+				io.ReadAll(tee.ReadBuffer())
 				wg.Done()
 			}()
 
@@ -177,7 +179,7 @@ func drainBody(b io.ReadCloser) (r1, r2 io.ReadCloser, err error) {
 	if err = b.Close(); err != nil {
 		return nil, nil, err
 	}
-	return ioutil.NopCloser(&buf), ioutil.NopCloser(bytes.NewReader(buf.Bytes())), nil
+	return io.NopCloser(&buf), io.NopCloser(bytes.NewReader(buf.Bytes())), nil
 }
 
 // dumpConn is a net.Conn which writes to Writer and reads from Reader
@@ -207,13 +209,26 @@ func (b neverEnding) Read(p []byte) (n int, err error) {
 // such as User-Agent.
 func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 	save := req.Body
-	dummyBody := false
 	if !body || req.Body == nil {
-		req.Body = nil
-		if req.ContentLength != 0 {
-			req.Body = ioutil.NopCloser(io.LimitReader(neverEnding('x'), req.ContentLength))
-			dummyBody = true
+		reqSend := new(http.Request)
+		*reqSend = *req
+		reqSend.Body = nil
+		reqSend.ContentLength = 0
+		reqSend.TransferEncoding = nil
+		reqSend.Header = req.Header.Clone()
+		reqSend.Header.Del("Content-Length")
+		reqSend.Header.Del("Transfer-Encoding")
+		if reqSend.URL.Scheme == "https" {
+			reqSend.URL = new(url.URL)
+			*reqSend.URL = *req.URL
+			reqSend.URL.Scheme = "http"
 		}
+
+		var buf bytes.Buffer
+		if err := reqSend.Write(&buf); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
 	} else {
 		var err error
 		save, req.Body, err = drainBody(req.Body)
@@ -248,7 +263,7 @@ func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 		req, _ := http.ReadRequest(bufio.NewReader(pr))
 		// THIS IS THE PART THAT'S BROKEN IN THE STDLIB (as of Go 1.3)
 		if req != nil && req.Body != nil {
-			ioutil.ReadAll(req.Body)
+			io.ReadAll(req.Body)
 		}
 		dr.c <- strings.NewReader("HTTP/1.1 204 No Content\r\n\r\n")
 	}()
@@ -266,19 +281,7 @@ func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	dump := buf.Bytes()
-
-	// If we used a dummy body above, remove it now.
-	// TODO: if the req.ContentLength is large, we allocate memory
-	// unnecessarily just to slice it off here.  But this is just
-	// a debug function, so this is acceptable for now. We could
-	// discard the body earlier if this matters.
-	if dummyBody {
-		if i := bytes.Index(dump, []byte("\r\n\r\n")); i >= 0 {
-			dump = dump[:i+4]
-		}
-	}
-	return dump, nil
+	return buf.Bytes(), nil
 }
 
 // delegateReader is a reader that delegates to another reader,

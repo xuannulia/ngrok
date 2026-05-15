@@ -36,16 +36,17 @@ Examples:
 `
 
 type Options struct {
-	config    string
-	logto     string
-	loglevel  string
-	authtoken string
-	httpauth  string
-	hostname  string
-	protocol  string
-	subdomain string
-	command   string
-	args      []string
+	config      string
+	logto       string
+	loglevel    string
+	authtoken   string
+	inspectauth string
+	httpauth    string
+	hostname    string
+	protocol    string
+	subdomain   string
+	command     string
+	args        []string
 }
 
 func ParseArgs() (opts *Options, err error) {
@@ -75,6 +76,11 @@ func ParseArgs() (opts *Options, err error) {
 		"",
 		"Authentication token for identifying an ngrok.com account")
 
+	inspectauth := flag.String(
+		"inspectauth",
+		"",
+		"username:password HTTP basic auth creds protecting the local inspection interface")
+
 	httpauth := flag.String(
 		"httpauth",
 		"",
@@ -98,15 +104,16 @@ func ParseArgs() (opts *Options, err error) {
 	flag.Parse()
 
 	opts = &Options{
-		config:    *config,
-		logto:     *logto,
-		loglevel:  *loglevel,
-		httpauth:  *httpauth,
-		subdomain: *subdomain,
-		protocol:  *protocol,
-		authtoken: *authtoken,
-		hostname:  *hostname,
-		command:   flag.Arg(0),
+		config:      *config,
+		logto:       *logto,
+		loglevel:    *loglevel,
+		httpauth:    *httpauth,
+		inspectauth: *inspectauth,
+		subdomain:   *subdomain,
+		protocol:    *protocol,
+		authtoken:   *authtoken,
+		hostname:    *hostname,
+		command:     flag.Arg(0),
 	}
 
 	switch opts.command {

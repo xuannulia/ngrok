@@ -1,0 +1,44 @@
+[Unit]
+Description=ngrokd tunnel server
+Documentation=file:/usr/local/share/doc/ngrok/SELFHOSTING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ngrok
+Group=ngrok
+EnvironmentFile=/etc/ngrok/ngrokd.env
+ExecStart=/usr/local/bin/ngrokd \
+  -domain=${NGROKD_DOMAIN} \
+  -tlsCrt=${NGROKD_TLS_CRT} \
+  -tlsKey=${NGROKD_TLS_KEY} \
+  -authToken=${NGROKD_AUTH_TOKEN} \
+  -httpAddr=${NGROKD_HTTP_ADDR} \
+  -httpsAddr=${NGROKD_HTTPS_ADDR} \
+  -tunnelAddr=${NGROKD_TUNNEL_ADDR} \
+  -log=stdout \
+  -log-level=${NGROKD_LOG_LEVEL} \
+  -maxConnections=${NGROKD_MAX_CONNECTIONS} \
+  ${NGROKD_EXTRA_ARGS}
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+LimitNOFILE=1048576
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/ngrok
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

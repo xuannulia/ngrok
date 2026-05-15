@@ -101,6 +101,11 @@ func NewControl(ctlConn conn.Conn, authMsg *msg.Auth) {
 		return
 	}
 
+	if err = validateAuth(authMsg); err != nil {
+		failAuth(err)
+		return
+	}
+
 	// register the control
 	if replaced := controlRegistry.Add(c.id, c); replaced != nil {
 		replaced.shutdown.WaitComplete()

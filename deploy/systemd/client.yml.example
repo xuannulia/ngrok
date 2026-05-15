@@ -1,0 +1,13 @@
+server_addr: example.com:4443
+auth_token: change-me-long-random-token
+trust_host_root_certs: true
+inspect_addr: 127.0.0.1:4040
+
+tunnels:
+  web:
+    proto:
+      http: 127.0.0.1:3000
+    subdomain: app
+  ssh:
+    proto:
+      tcp: 127.0.0.1:22

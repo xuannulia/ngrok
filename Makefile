@@ -1,11 +1,12 @@
-.PHONY: default server client deps fmt clean all release-all assets client-assets server-assets contributors
+.PHONY: default server client deps fmt clean all release-all contributors
 export GOPATH:=$(shell pwd)
+export GO111MODULE:=off
 
 BUILDTAGS=debug
 default: all
 
-deps: assets
-	go get -tags '$(BUILDTAGS)' -d -v ngrok/...
+deps:
+	go list -tags '$(BUILDTAGS)' ngrok/... >/dev/null
 
 server: deps
 	go install -tags '$(BUILDTAGS)' ngrok/main/ngrokd
@@ -15,23 +16,6 @@ fmt:
 
 client: deps
 	go install -tags '$(BUILDTAGS)' ngrok/main/ngrok
-
-assets: client-assets server-assets
-
-bin/go-bindata:
-	GOOS="" GOARCH="" go get github.com/jteeuwen/go-bindata/go-bindata
-
-client-assets: bin/go-bindata
-	bin/go-bindata -nomemcopy -pkg=assets -tags=$(BUILDTAGS) \
-		-debug=$(if $(findstring debug,$(BUILDTAGS)),true,false) \
-		-o=src/ngrok/client/assets/assets_$(BUILDTAGS).go \
-		assets/client/...
-
-server-assets: bin/go-bindata
-	bin/go-bindata -nomemcopy -pkg=assets -tags=$(BUILDTAGS) \
-		-debug=$(if $(findstring debug,$(BUILDTAGS)),true,false) \
-		-o=src/ngrok/server/assets/assets_$(BUILDTAGS).go \
-		assets/server/...
 
 release-client: BUILDTAGS=release
 release-client: client
@@ -45,7 +29,7 @@ all: fmt client server
 
 clean:
 	go clean -i -r ngrok/...
-	rm -rf src/ngrok/client/assets/ src/ngrok/server/assets/
+	rm -rf bin/ pkg/
 
 contributors:
 	echo "Contributors to ngrok, both large and small:\n" > CONTRIBUTORS
