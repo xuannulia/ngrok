@@ -34,6 +34,7 @@ const (
 	defaultClientPath  = "/etc/ngrok/client.yml"
 	defaultNginxPath   = "/etc/nginx/conf.d/ngrok.conf"
 	defaultServiceName = "ngrokd"
+	defaultServerBin   = "/usr/local/bin/ngrokd"
 	sessionCookie      = "ngrok_admin_session"
 	passwordIterations = 210000
 )
@@ -55,6 +56,7 @@ type options struct {
 	workDir     string
 	certDir     string
 	serviceName string
+	serverBin   string
 	timeout     time.Duration
 }
 
@@ -164,6 +166,7 @@ type viewData struct {
 	CertRows    []domainCertRow
 	Binaries    []binaryItem
 	Server      binaryItem
+	ServerLive  binaryItem
 	Platforms   []clientPlatform
 	Steps       []setupStep
 	NextStep    setupStep
@@ -187,6 +190,7 @@ func Main() {
 	flag.StringVar(&opts.workDir, "work-dir", "", "project work directory")
 	flag.StringVar(&opts.certDir, "cert-dir", "", "certificate output directory")
 	flag.StringVar(&opts.serviceName, "service", defaultServiceName, "systemd service name")
+	flag.StringVar(&opts.serverBin, "server-bin", defaultServerBin, "installed ngrokd binary path")
 	flag.DurationVar(&opts.timeout, "timeout", 90*time.Second, "command timeout")
 	flag.Parse()
 	opts.applyDefaults()
@@ -633,6 +637,8 @@ func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
 		switch target {
 		case "server":
 			out, err = runCommandInDir(a.opts.timeout, nil, a.opts.workDir, "make", "release-server")
+		case "server_install":
+			out, err = a.installServerBinary()
 		case "client":
 			platform, ok := clientPlatformByKey(r.Form.Get("platform"))
 			if !ok {
@@ -646,6 +652,7 @@ func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if err != nil && out == "" {
 			data.Error = err.Error()
 			data.Server = serverBinaryItem(a.opts.workDir)
+			data.ServerLive = serverLiveItem(a.opts.workDir, a.opts.serverBin)
 			data.Platforms = clientPlatformItems(a.opts.workDir)
 			render(w, data)
 			return
@@ -658,8 +665,28 @@ func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.Server = serverBinaryItem(a.opts.workDir)
+	data.ServerLive = serverLiveItem(a.opts.workDir, a.opts.serverBin)
 	data.Platforms = clientPlatformItems(a.opts.workDir)
 	render(w, data)
+}
+
+func (a *app) installServerBinary() (string, error) {
+	src := filepath.Join(a.opts.workDir, "bin", "ngrokd")
+	if _, err := os.Stat(src); err != nil {
+		return "", errors.New("server binary is not built")
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return "", err
+	}
+	if err := writeFileRoot(a.opts.serverBin, b, 0755); err != nil {
+		return "", err
+	}
+	out, err := runCommand(a.opts.timeout, nil, "systemctl", "restart", a.opts.serviceName)
+	if strings.TrimSpace(out) == "" {
+		out = a.opts.serverBin + "\n"
+	}
+	return out, err
 }
 
 func (a *app) handleService(w http.ResponseWriter, r *http.Request) {
@@ -1174,9 +1201,10 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 
 	buildState := "done"
 	server := serverBinaryItem(opts.workDir)
+	serverLive := serverLiveItem(opts.workDir, opts.serverBin)
 	clients := clientPlatformItems(opts.workDir)
-	buildDetail := buildSummary(server, clients)
-	if server.State != "ok" || !hasBuiltClient(clients) {
+	buildDetail := buildSummary(server, serverLive, clients)
+	if server.State != "ok" || serverLive.State != "ok" || !hasBuiltClient(clients) {
 		buildState = "todo"
 	}
 
@@ -1452,6 +1480,29 @@ func serverBinaryItem(workDir string) binaryItem {
 	return item
 }
 
+func serverLiveItem(workDir, serverBin string) binaryItem {
+	item := binaryItem{Name: serverBin, Path: serverBin, State: "missing"}
+	if st, err := os.Stat(serverBin); err == nil {
+		item.State = "todo"
+		item.Size = fmt.Sprintf("%.1f MB", float64(st.Size())/1024/1024)
+		if sameFileDigest(filepath.Join(workDir, "bin", "ngrokd"), serverBin) {
+			item.State = "ok"
+		}
+	}
+	return item
+}
+
+func sameFileDigest(left, right string) bool {
+	leftBytes, leftErr := os.ReadFile(left)
+	rightBytes, rightErr := os.ReadFile(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	leftHash := sha256.Sum256(leftBytes)
+	rightHash := sha256.Sum256(rightBytes)
+	return leftHash == rightHash
+}
+
 func clientPlatformItems(workDir string) []clientPlatform {
 	items := make([]clientPlatform, 0, len(availableClientPlatforms))
 	for _, platform := range availableClientPlatforms {
@@ -1486,23 +1537,23 @@ func hasBuiltClient(platforms []clientPlatform) bool {
 	return false
 }
 
-func buildSummary(server binaryItem, clients []clientPlatform) string {
+func buildSummary(server, serverLive binaryItem, clients []clientPlatform) string {
 	var built []string
 	for _, client := range clients {
 		if client.State == "ok" {
 			built = append(built, client.Filename)
 		}
 	}
-	if server.State == "ok" && len(built) > 0 {
-		return "ngrokd / " + strings.Join(built, ", ")
+	serverState := "server missing"
+	if server.State == "ok" && serverLive.State == "ok" {
+		serverState = "server installed"
+	} else if server.State == "ok" {
+		serverState = "server not installed"
 	}
-	if server.State == "ok" {
-		return "ngrokd / client missing"
+	if len(built) == 0 {
+		return serverState + " / client missing"
 	}
-	if len(built) > 0 {
-		return "server missing / " + strings.Join(built, ", ")
-	}
-	return filepath.Join(filepath.Dir(server.Path), "ngrokd")
+	return serverState + " / " + strings.Join(built, ", ")
 }
 
 func downloadSummary(clients []clientPlatform) string {

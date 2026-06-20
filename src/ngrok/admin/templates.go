@@ -152,10 +152,12 @@ const pageHTML = `{{define "layout"}}
   <h1>{{tr .Lang "Build"}}</h1>
   <table class="build-table">
     <tr><th>{{tr .Lang "work_dir"}}</th><td colspan="3">{{.WorkDir}}</td></tr>
-    <tr><th>{{tr .Lang "server_binary"}}</th><td><span class="badge">{{state .Lang .Server.State}}</span></td><td>{{.Server.Size}}</td><td></td></tr>
+    <tr><th>{{tr .Lang "server_build"}}</th><td>{{.Server.Path}}</td><td><span class="badge">{{state .Lang .Server.State}}</span></td><td>{{.Server.Size}}</td></tr>
+    <tr><th>{{tr .Lang "server_live"}}</th><td>{{.ServerLive.Path}}</td><td><span class="badge">{{state .Lang .ServerLive.State}}</span></td><td>{{.ServerLive.Size}}</td></tr>
   </table>
   <form method="post" action="/build" class="actions build-actions server-actions">
     <button name="target" value="server" type="submit">{{tr .Lang "build_server"}}</button>
+    <button name="target" value="server_install" type="submit">{{tr .Lang "install_server"}}</button>
   </form>
   <h2>{{tr .Lang "client_platforms"}}</h2>
   <table class="platform-table">
