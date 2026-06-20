@@ -44,6 +44,8 @@ type options struct {
 	envPath     string
 	clientPath  string
 	nginxPath   string
+	workDir     string
+	certDir     string
 	serviceName string
 	timeout     time.Duration
 }
@@ -102,6 +104,14 @@ type checkItem struct {
 	Detail string
 }
 
+type binaryItem struct {
+	Name  string
+	Path  string
+	State string
+	Size  string
+	URL   string
+}
+
 type setupStep struct {
 	Key    string
 	Title  string
@@ -122,12 +132,18 @@ type viewData struct {
 	Cert         certStatus
 	Service      serviceStatus
 	Checks       []checkItem
+	DNSChecks    []checkItem
+	Binaries     []binaryItem
 	Steps        []setupStep
 	NextStep     setupStep
 	ClientConfig string
 	NginxConfig  string
+	BuildOutput  string
+	Domains      string
 	NginxPath    string
 	ClientPath   string
+	WorkDir      string
+	CertDir      string
 	EnvPath      string
 	Addr         string
 	Now          string
@@ -140,9 +156,12 @@ func Main() {
 	flag.StringVar(&opts.envPath, "env", defaultEnvPath, "ngrokd environment file")
 	flag.StringVar(&opts.clientPath, "client-config", defaultClientPath, "client config output path")
 	flag.StringVar(&opts.nginxPath, "nginx-conf", defaultNginxPath, "nginx config output path")
+	flag.StringVar(&opts.workDir, "work-dir", "", "project work directory")
+	flag.StringVar(&opts.certDir, "cert-dir", "", "certificate output directory")
 	flag.StringVar(&opts.serviceName, "service", defaultServiceName, "systemd service name")
 	flag.DurationVar(&opts.timeout, "timeout", 90*time.Second, "command timeout")
 	flag.Parse()
+	opts.applyDefaults()
 
 	a, err := newApp(opts)
 	if err != nil {
@@ -186,6 +205,35 @@ func newApp(opts options) (*app, error) {
 	}, nil
 }
 
+func (o *options) applyDefaults() {
+	if o.workDir == "" {
+		o.workDir = detectWorkDir()
+	}
+	if o.certDir == "" {
+		o.certDir = filepath.Join(o.workDir, "certs")
+	}
+}
+
+func detectWorkDir() string {
+	if cwd, err := os.Getwd(); err == nil && fileExists(filepath.Join(cwd, "Makefile")) && fileExists(filepath.Join(cwd, "src", "ngrok")) {
+		return cwd
+	}
+	for _, path := range []string{"/root/ngrok", "/opt/ngrok", "/usr/local/src/ngrok"} {
+		if fileExists(filepath.Join(path, "Makefile")) && fileExists(filepath.Join(path, "src", "ngrok")) {
+			return path
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "."
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleHome)
@@ -196,8 +244,13 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/certificate", a.handleCertificate)
 	mux.HandleFunc("/certificate/issue", a.handleCertificateIssue)
 	mux.HandleFunc("/nginx", a.handleNginx)
+	mux.HandleFunc("/build", a.handleBuild)
 	mux.HandleFunc("/service", a.handleService)
 	mux.HandleFunc("/client", a.handleClient)
+	mux.HandleFunc("/download/client.yml", a.handleDownloadClientConfig)
+	mux.HandleFunc("/download/ngrok", a.handleDownloadBinary("ngrok"))
+	mux.HandleFunc("/download/ngrokd", a.handleDownloadBinary("ngrokd"))
+	mux.HandleFunc("/download/ngrok-admin", a.handleDownloadBinary("ngrok-admin"))
 	mux.HandleFunc("/static/style.css", handleStyle)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if lang := normalizeLang(r.URL.Query().Get("lang")); lang != "" {
@@ -238,6 +291,8 @@ func (a *app) baseData(r *http.Request, title, page string) viewData {
 		Config:     cfg,
 		NginxPath:  nginxPath,
 		ClientPath: a.opts.clientPath,
+		WorkDir:    a.opts.workDir,
+		CertDir:    a.opts.certDir,
 		EnvPath:    a.opts.envPath,
 		Addr:       a.opts.addr,
 		Now:        time.Now().Format(time.RFC3339),
@@ -388,6 +443,9 @@ func (a *app) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	data := a.baseData(r, "Certificate", "certificate")
 	data.Cert = readCertStatus(data.Config)
+	domains := configuredDomainList(a.opts.envPath, data.Config)
+	data.Domains = strings.Join(domains, "\n")
+	data.DNSChecks = domainDNSChecks(domains)
 	render(w, data)
 }
 
@@ -405,12 +463,36 @@ func (a *app) handleCertificateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := readServerConfig(a.opts.envPath)
 	cfg.applyDefaults()
+	domains := parseDomainInput(r.Form.Get("domains"))
+	if len(domains) == 0 {
+		domains = configuredDomainList(a.opts.envPath, cfg)
+	}
+	if failed := firstFailedCheck(domainDNSChecks(domains)); failed != nil {
+		data := a.baseData(r, "Certificate", "certificate")
+		data.Cert = readCertStatus(data.Config)
+		data.Domains = strings.Join(domains, "\n")
+		data.DNSChecks = domainDNSChecks(domains)
+		data.Error = failed.Detail
+		render(w, data)
+		return
+	}
 	dnsPlugin := strings.TrimSpace(r.Form.Get("dns_plugin"))
 	accountEmail := strings.TrimSpace(r.Form.Get("account_email"))
 	envText := r.Form.Get("env_vars")
-	out, err := issueWithAcmeSH(cfg, dnsPlugin, accountEmail, envText, a.opts.timeout)
+	out, err := issueWithAcmeSH(cfg, domains, a.opts.certDir, dnsPlugin, accountEmail, envText, a.opts.timeout)
+	if err == nil {
+		cfg.Domain = domains[0]
+		cfg.ControlHost = first(cfg.ControlHost, "ngrok."+domains[0])
+		cfg.TLSCrt = filepath.Join(a.opts.certDir, "fullchain.pem")
+		cfg.TLSKey = filepath.Join(a.opts.certDir, "privkey.pem")
+		if writeErr := writeServerConfig(a.opts.envPath, cfg); writeErr != nil {
+			err = writeErr
+		}
+	}
 	data := a.baseData(r, "Certificate", "certificate")
 	data.Cert = readCertStatus(data.Config)
+	data.Domains = strings.Join(domains, "\n")
+	data.DNSChecks = domainDNSChecks(domains)
 	data.Message = tail(out, 4000)
 	if err != nil {
 		data.Error = err.Error()
@@ -459,6 +541,29 @@ func (a *app) handleNginx(w http.ResponseWriter, r *http.Request) {
 	}
 	data := a.baseData(r, "Nginx", "nginx")
 	data.NginxConfig = nginxConfig(cfg)
+	render(w, data)
+}
+
+func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	data := a.baseData(r, "Build", "build")
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Build", "build", err)
+			return
+		}
+		target := buildTarget(r.Form.Get("target"))
+		out, err := runCommandInDir(a.opts.timeout, nil, a.opts.workDir, "make", target)
+		data.BuildOutput = tail(out, 8000)
+		if err != nil {
+			data.Error = err.Error()
+		} else {
+			data.Message = messageText(data.Lang, "build_done")
+		}
+	}
+	data.Binaries = binaryItems(a.opts.workDir)
 	render(w, data)
 }
 
@@ -519,6 +624,45 @@ func (a *app) handleClient(w http.ResponseWriter, r *http.Request) {
 	data := a.baseData(r, "Client", "client")
 	data.ClientConfig = client
 	render(w, data)
+}
+
+func (a *app) handleDownloadClientConfig(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	cfg := readServerConfig(a.opts.envPath)
+	cfg.applyDefaults()
+	w.Header().Set("Content-Type", "application/x-yaml; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="client.yml"`)
+	_, _ = io.WriteString(w, clientConfig(cfg))
+}
+
+func (a *app) handleDownloadBinary(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.requireAuth(w, r) {
+			return
+		}
+		path := filepath.Join(a.opts.workDir, "bin", name)
+		if _, err := os.Stat(path); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
+		http.ServeFile(w, r, path)
+	}
+}
+
+func buildTarget(target string) string {
+	switch target {
+	case "server":
+		return "release-server"
+	case "client":
+		return "release-client"
+	case "admin":
+		return "release-admin"
+	default:
+		return "release-all"
+	}
 }
 
 func (a *app) renderError(w http.ResponseWriter, r *http.Request, title, page string, err error) {
@@ -961,6 +1105,16 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 		nginxState = "todo"
 	}
 
+	buildState := "done"
+	buildDetail := filepath.Join(opts.workDir, "bin")
+	for _, item := range binaryItems(opts.workDir) {
+		if item.State != "ok" {
+			buildState = "todo"
+			buildDetail = item.Path
+			break
+		}
+	}
+
 	serviceState := "done"
 	serviceDetail := service.State
 	if service.State != "active" {
@@ -977,6 +1131,7 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 		{Key: "step_config", Title: "Config", State: configState, Detail: configDetail, URL: "/config", Action: "Open"},
 		{Key: "step_certificate", Title: "Certificate", State: certState, Detail: certDetail, URL: "/certificate", Action: "Open"},
 		{Key: "step_nginx", Title: "Nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "Open"},
+		{Key: "step_build", Title: "Build", State: buildState, Detail: buildDetail, URL: "/build", Action: "Open"},
 		{Key: "step_service", Title: "Service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "Open"},
 		{Key: "step_client", Title: "Client", State: clientState, Detail: clientDetail, URL: "/client", Action: "Open"},
 	}
@@ -1023,12 +1178,115 @@ func detectNginxPath(cfg serverConfig, fallback string) string {
 	return fallback
 }
 
+func configuredDomainList(envPath string, cfg serverConfig) []string {
+	cfg.applyDefaults()
+	seen := make(map[string]bool)
+	var result []string
+	add := func(domain string) {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		domain = strings.TrimPrefix(domain, "*.")
+		domain = stripPort(domain)
+		if domain == "" || seen[domain] {
+			return
+		}
+		seen[domain] = true
+		result = append(result, domain)
+	}
+	add(cfg.Domain)
+	values := readEnvFile(envPath)
+	for _, item := range strings.Split(values["VHOST"], ",") {
+		add(item)
+	}
+	if len(result) == 0 {
+		add("example.com")
+	}
+	return result
+}
+
+func parseDomainInput(input string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	fields := strings.FieldsFunc(input, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	for _, field := range fields {
+		domain := strings.ToLower(strings.TrimSpace(field))
+		domain = strings.TrimPrefix(domain, "*.")
+		domain = stripPort(domain)
+		if domain == "" || seen[domain] {
+			continue
+		}
+		seen[domain] = true
+		result = append(result, domain)
+	}
+	return result
+}
+
+func stripPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func domainDNSChecks(domains []string) []checkItem {
+	var checks []checkItem
+	for _, domain := range domains {
+		checks = append(checks, dnsCheck(domain, domain))
+		checks = append(checks, dnsCheck("*."+domain, "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+domain))
+	}
+	return checks
+}
+
+func firstFailedCheck(checks []checkItem) *checkItem {
+	for i := range checks {
+		if checks[i].State != "ok" {
+			return &checks[i]
+		}
+	}
+	return nil
+}
+
 func dnsCheck(name, host string) checkItem {
 	addrs, err := net.LookupHost(host)
 	if err != nil {
 		return checkItem{Name: name, State: "fail", Detail: err.Error()}
 	}
 	return checkItem{Name: name, State: "ok", Detail: strings.Join(addrs, ", ")}
+}
+
+func binaryItems(workDir string) []binaryItem {
+	names := []string{"ngrokd", "ngrok", "ngrok-admin"}
+	var items []binaryItem
+	for _, name := range names {
+		path := filepath.Join(workDir, "bin", name)
+		item := binaryItem{Name: name, Path: path, State: "missing", URL: "/download/" + name}
+		if st, err := os.Stat(path); err == nil {
+			item.State = "ok"
+			item.Size = fmt.Sprintf("%.1f MB", float64(st.Size())/1024/1024)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func runCommandInDir(timeout time.Duration, extraEnv []string, dir, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	timer := time.AfterFunc(timeout, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	out, err := cmd.CombinedOutput()
+	timer.Stop()
+	if err != nil {
+		return string(out), fmt.Errorf("%s: %w", strings.Join(append([]string{name}, args...), " "), err)
+	}
+	return string(out), nil
 }
 
 func tcpCheck(name, host, port string) checkItem {
@@ -1041,17 +1299,26 @@ func tcpCheck(name, host, port string) checkItem {
 	return checkItem{Name: name, State: "ok", Detail: target}
 }
 
-func issueWithAcmeSH(cfg serverConfig, dnsPlugin, accountEmail, envText string, timeout time.Duration) (string, error) {
+func issueWithAcmeSH(cfg serverConfig, domains []string, certDir, dnsPlugin, accountEmail, envText string, timeout time.Duration) (string, error) {
 	cfg.applyDefaults()
 	if dnsPlugin == "" {
 		return "", errors.New("dns plugin is required")
+	}
+	if len(domains) == 0 {
+		return "", errors.New("domain is required")
 	}
 	bin, err := findAcmeSH()
 	if err != nil {
 		return "", err
 	}
+	if err := os.MkdirAll(certDir, 0750); err != nil {
+		return "", err
+	}
 	env := parseEnvLines(envText)
-	args := []string{"--issue", "--dns", dnsPlugin, "-d", cfg.Domain, "-d", "*." + cfg.Domain}
+	args := []string{"--issue", "--dns", dnsPlugin}
+	for _, domain := range domains {
+		args = append(args, "-d", domain, "-d", "*."+domain)
+	}
 	if accountEmail != "" {
 		args = append(args, "--accountemail", accountEmail)
 	}
@@ -1059,7 +1326,13 @@ func issueWithAcmeSH(cfg serverConfig, dnsPlugin, accountEmail, envText string, 
 	if err != nil {
 		return out1, err
 	}
-	out2, err := runCommand(timeout, env, bin, "--install-cert", "-d", cfg.Domain, "--fullchain-file", cfg.TLSCrt, "--key-file", cfg.TLSKey, "--reloadcmd", "systemctl reload nginx || true")
+	out2, err := runCommand(timeout, env, bin,
+		"--install-cert",
+		"-d", domains[0],
+		"--fullchain-file", filepath.Join(certDir, "fullchain.pem"),
+		"--key-file", filepath.Join(certDir, "privkey.pem"),
+		"--reloadcmd", "systemctl reload nginx || true",
+	)
 	return out1 + "\n" + out2, err
 }
 
