@@ -38,6 +38,14 @@ const (
 	passwordIterations = 210000
 )
 
+var availableClientPlatforms = []clientPlatform{
+	{Key: "linux-amd64", LabelKey: "platform_linux_amd64", GOOS: "linux", GOARCH: "amd64", Filename: "ngrok-linux-amd64"},
+	{Key: "linux-arm64", LabelKey: "platform_linux_arm64", GOOS: "linux", GOARCH: "arm64", Filename: "ngrok-linux-arm64"},
+	{Key: "darwin-amd64", LabelKey: "platform_darwin_amd64", GOOS: "darwin", GOARCH: "amd64", Filename: "ngrok-darwin-amd64"},
+	{Key: "darwin-arm64", LabelKey: "platform_darwin_arm64", GOOS: "darwin", GOARCH: "arm64", Filename: "ngrok-darwin-arm64"},
+	{Key: "windows-amd64", LabelKey: "platform_windows_amd64", GOOS: "windows", GOARCH: "amd64", Filename: "ngrok-windows-amd64.exe"},
+}
+
 type options struct {
 	addr        string
 	statePath   string
@@ -121,6 +129,18 @@ type binaryItem struct {
 	URL   string
 }
 
+type clientPlatform struct {
+	Key      string
+	LabelKey string
+	GOOS     string
+	GOARCH   string
+	Filename string
+	Path     string
+	State    string
+	Size     string
+	URL      string
+}
+
 type setupStep struct {
 	Key    string
 	Title  string
@@ -143,6 +163,8 @@ type viewData struct {
 	Checks      []checkItem
 	CertRows    []domainCertRow
 	Binaries    []binaryItem
+	Server      binaryItem
+	Platforms   []clientPlatform
 	Steps       []setupStep
 	NextStep    setupStep
 	NginxConfig string
@@ -254,7 +276,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/build", a.handleBuild)
 	mux.HandleFunc("/service", a.handleService)
 	mux.HandleFunc("/download/client.yml", a.handleDownloadClientConfig)
-	mux.HandleFunc("/download/ngrok", a.handleDownloadBinary("ngrok"))
+	mux.HandleFunc("/download/client/", a.handleDownloadClientBinary)
 	mux.HandleFunc("/static/style.css", handleStyle)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if lang := normalizeLang(r.URL.Query().Get("lang")); lang != "" {
@@ -605,14 +627,29 @@ func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
 			a.renderError(w, r, "Build", "build", err)
 			return
 		}
-		target, err := buildTarget(r.Form.Get("target"))
-		if err != nil {
+		target := r.Form.Get("target")
+		var out string
+		var err error
+		switch target {
+		case "server":
+			out, err = runCommandInDir(a.opts.timeout, nil, a.opts.workDir, "make", "release-server")
+		case "client":
+			platform, ok := clientPlatformByKey(r.Form.Get("platform"))
+			if !ok {
+				err = errors.New("client platform is required")
+				break
+			}
+			out, err = buildClientForPlatform(a.opts.timeout, a.opts.workDir, platform)
+		default:
+			err = errors.New("unsupported build target")
+		}
+		if err != nil && out == "" {
 			data.Error = err.Error()
-			data.Binaries = binaryItems(a.opts.workDir)
+			data.Server = serverBinaryItem(a.opts.workDir)
+			data.Platforms = clientPlatformItems(a.opts.workDir)
 			render(w, data)
 			return
 		}
-		out, err := runCommandInDir(a.opts.timeout, nil, a.opts.workDir, "make", target)
 		data.BuildOutput = tail(out, 8000)
 		if err != nil {
 			data.Error = err.Error()
@@ -620,7 +657,8 @@ func (a *app) handleBuild(w http.ResponseWriter, r *http.Request) {
 			data.Message = messageText(data.Lang, "build_done")
 		}
 	}
-	data.Binaries = binaryItems(a.opts.workDir)
+	data.Server = serverBinaryItem(a.opts.workDir)
+	data.Platforms = clientPlatformItems(a.opts.workDir)
 	render(w, data)
 }
 
@@ -671,30 +709,23 @@ func (a *app) handleDownloadClientConfig(w http.ResponseWriter, r *http.Request)
 	_, _ = io.WriteString(w, clientConfig(cfg))
 }
 
-func (a *app) handleDownloadBinary(name string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.requireAuth(w, r) {
-			return
-		}
-		path := filepath.Join(a.opts.workDir, "bin", name)
-		if _, err := os.Stat(path); err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
-		http.ServeFile(w, r, path)
+func (a *app) handleDownloadClientBinary(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
 	}
-}
-
-func buildTarget(target string) (string, error) {
-	switch target {
-	case "server":
-		return "release-server", nil
-	case "client":
-		return "release-client", nil
-	default:
-		return "", errors.New("unsupported build target")
+	key := strings.TrimPrefix(r.URL.Path, "/download/client/")
+	platform, ok := clientPlatformByKey(key)
+	if !ok {
+		http.NotFound(w, r)
+		return
 	}
+	path := filepath.Join(a.opts.workDir, "bin", platform.Filename)
+	if _, err := os.Stat(path); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, platform.Filename))
+	http.ServeFile(w, r, path)
 }
 
 func (a *app) renderError(w http.ResponseWriter, r *http.Request, title, page string, err error) {
@@ -1142,13 +1173,11 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 	}
 
 	buildState := "done"
-	buildDetail := filepath.Join(opts.workDir, "bin")
-	for _, item := range binaryItems(opts.workDir) {
-		if item.State != "ok" {
-			buildState = "todo"
-			buildDetail = item.Path
-			break
-		}
+	server := serverBinaryItem(opts.workDir)
+	clients := clientPlatformItems(opts.workDir)
+	buildDetail := buildSummary(server, clients)
+	if server.State != "ok" || !hasBuiltClient(clients) {
+		buildState = "todo"
 	}
 
 	serviceState := "done"
@@ -1157,12 +1186,20 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 		serviceState = "todo"
 	}
 
+	downloadState := "done"
+	downloadDetail := downloadSummary(clients)
+	if !hasBuiltClient(clients) {
+		downloadState = "todo"
+	}
+
 	return []setupStep{
-		{Key: "step_config", Title: "Config", State: configState, Detail: configDetail, URL: "/config", Action: "Open"},
-		{Key: "step_certificate", Title: "Certificate", State: certState, Detail: certDetail, URL: "/certificate", Action: "Open"},
-		{Key: "step_nginx", Title: "Nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "Open"},
-		{Key: "step_build", Title: "Build", State: buildState, Detail: buildDetail, URL: "/build", Action: "Open"},
-		{Key: "step_service", Title: "Service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "Open"},
+		{Key: "step_config", Title: "deploy_step_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
+		{Key: "step_dns", Title: "deploy_step_dns", State: dnsStepState(cfg), Detail: dnsStepDetail(cfg), URL: "/", Action: "refresh_dns"},
+		{Key: "step_certificate", Title: "deploy_step_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
+		{Key: "step_nginx", Title: "deploy_step_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
+		{Key: "step_build", Title: "deploy_step_build", State: buildState, Detail: buildDetail, URL: "/build", Action: "open"},
+		{Key: "step_service", Title: "deploy_step_service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "open"},
+		{Key: "step_download", Title: "deploy_step_download", State: downloadState, Detail: downloadDetail, URL: "/build", Action: "open"},
 	}
 }
 
@@ -1314,6 +1351,22 @@ func domainCertRows(certDir string, domains []string, cfg serverConfig) []domain
 	return rows
 }
 
+func dnsStepState(cfg serverConfig) string {
+	if firstFailedCheck(domainDNSChecks([]string{cfg.Domain})) != nil {
+		return "todo"
+	}
+	if dnsCheck("control DNS", cfg.ControlHost).State != "ok" {
+		return "todo"
+	}
+	return "done"
+}
+
+func dnsStepDetail(cfg serverConfig) string {
+	control := dnsCheck("control DNS", cfg.ControlHost)
+	wildcard := dnsCheck("wildcard DNS", "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+cfg.Domain)
+	return control.Detail + " / " + wildcard.Detail
+}
+
 func firstFailedCheck(checks []checkItem) *checkItem {
 	for i := range checks {
 		if checks[i].State != "ok" {
@@ -1389,22 +1442,95 @@ func certStateForDomain(domain, certPath string) (string, string) {
 	return "ok", cert.NotAfter.Format("2006-01-02 15:04 MST")
 }
 
-func binaryItems(workDir string) []binaryItem {
-	names := []string{"ngrokd", "ngrok"}
-	var items []binaryItem
-	for _, name := range names {
-		path := filepath.Join(workDir, "bin", name)
-		item := binaryItem{Name: name, Path: path, State: "missing"}
-		if name == "ngrok" {
-			item.URL = "/download/ngrok"
-		}
-		if st, err := os.Stat(path); err == nil {
+func serverBinaryItem(workDir string) binaryItem {
+	path := filepath.Join(workDir, "bin", "ngrokd")
+	item := binaryItem{Name: "ngrokd", Path: path, State: "missing"}
+	if st, err := os.Stat(path); err == nil {
+		item.State = "ok"
+		item.Size = fmt.Sprintf("%.1f MB", float64(st.Size())/1024/1024)
+	}
+	return item
+}
+
+func clientPlatformItems(workDir string) []clientPlatform {
+	items := make([]clientPlatform, 0, len(availableClientPlatforms))
+	for _, platform := range availableClientPlatforms {
+		item := platform
+		item.Path = filepath.Join(workDir, "bin", platform.Filename)
+		item.State = "missing"
+		if st, err := os.Stat(item.Path); err == nil {
 			item.State = "ok"
 			item.Size = fmt.Sprintf("%.1f MB", float64(st.Size())/1024/1024)
+			item.URL = "/download/client/" + item.Key
 		}
 		items = append(items, item)
 	}
 	return items
+}
+
+func clientPlatformByKey(key string) (clientPlatform, bool) {
+	for _, platform := range availableClientPlatforms {
+		if platform.Key == key {
+			return platform, true
+		}
+	}
+	return clientPlatform{}, false
+}
+
+func hasBuiltClient(platforms []clientPlatform) bool {
+	for _, platform := range platforms {
+		if platform.State == "ok" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSummary(server binaryItem, clients []clientPlatform) string {
+	var built []string
+	for _, client := range clients {
+		if client.State == "ok" {
+			built = append(built, client.Filename)
+		}
+	}
+	if server.State == "ok" && len(built) > 0 {
+		return "ngrokd / " + strings.Join(built, ", ")
+	}
+	if server.State == "ok" {
+		return "ngrokd / client missing"
+	}
+	if len(built) > 0 {
+		return "server missing / " + strings.Join(built, ", ")
+	}
+	return filepath.Join(filepath.Dir(server.Path), "ngrokd")
+}
+
+func downloadSummary(clients []clientPlatform) string {
+	var built []string
+	for _, client := range clients {
+		if client.State == "ok" {
+			built = append(built, client.Filename)
+		}
+	}
+	if len(built) == 0 {
+		return "client binary missing"
+	}
+	return strings.Join(built, ", ") + " / client.yml"
+}
+
+func buildClientForPlatform(timeout time.Duration, workDir string, platform clientPlatform) (string, error) {
+	outPath := filepath.Join(workDir, "bin", platform.Filename)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0750); err != nil {
+		return "", err
+	}
+	env := []string{
+		"CGO_ENABLED=0",
+		"GO111MODULE=off",
+		"GOPATH=" + workDir,
+		"GOOS=" + platform.GOOS,
+		"GOARCH=" + platform.GOARCH,
+	}
+	return runCommandInDir(timeout, env, workDir, "go", "build", "-tags", "release", "-o", outPath, "ngrok/main/ngrok")
 }
 
 func runCommandInDir(timeout time.Duration, extraEnv []string, dir, name string, args ...string) (string, error) {

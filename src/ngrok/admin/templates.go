@@ -70,27 +70,18 @@ const pageHTML = `{{define "layout"}}
 {{define "dashboard"}}
 <section class="panel">
   <h1>{{tr .Lang "guide_title"}}</h1>
-  <div class="setup-main">
-    <div>
-      <h2>{{tr .Lang "guide_dns_title"}}</h2>
-      <pre class="snippet">{{.Config.ControlHost}} A/AAAA &lt;server-ip&gt;
+  <div class="deploy-doc">
+    <h2>{{tr .Lang "guide_dns_title"}}</h2>
+    <pre class="snippet">{{.Config.ControlHost}} A/AAAA &lt;server-ip&gt;
 *.{{.Config.Domain}} A/AAAA &lt;server-ip&gt;</pre>
-    </div>
-    <div class="next">
-      <div>
-        <span class="eyebrow">{{tr .Lang "next_step"}}</span>
-        <strong>{{tr .Lang .NextStep.Title}}</strong>
-      </div>
-      <a class="link-button" href="{{.NextStep.URL}}">{{tr .Lang "open"}}</a>
-    </div>
   </div>
-  <table class="steps-table">
+  <table class="steps-table deploy-table">
     {{range .Steps}}
     <tr>
       <th>{{tr $.Lang .Title}}</th>
       <td>{{.Detail}}</td>
       <td><span class="badge">{{state $.Lang .State}}</span></td>
-      <td><a href="{{.URL}}">{{tr $.Lang "open"}}</a></td>
+      <td><a href="{{.URL}}">{{tr $.Lang .Action}}</a></td>
     </tr>
     {{end}}
   </table>
@@ -159,15 +150,32 @@ const pageHTML = `{{define "layout"}}
 {{define "build"}}
 <section class="panel">
   <h1>{{tr .Lang "Build"}}</h1>
-  <table>
+  <table class="build-table">
     <tr><th>{{tr .Lang "work_dir"}}</th><td colspan="3">{{.WorkDir}}</td></tr>
-    {{range .Binaries}}
-    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Size}}</td><td>{{if .URL}}<a href="{{.URL}}">{{tr $.Lang "download"}}</a>{{end}}</td></tr>
-    {{end}}
-    <tr><th>client.yml</th><td><span class="badge">{{state .Lang "ok"}}</span></td><td></td><td><a href="/download/client.yml">{{tr .Lang "download"}}</a></td></tr>
+    <tr><th>{{tr .Lang "server_binary"}}</th><td><span class="badge">{{state .Lang .Server.State}}</span></td><td>{{.Server.Size}}</td><td></td></tr>
   </table>
-  <form method="post" action="/build" class="actions build-actions">
+  <form method="post" action="/build" class="actions build-actions server-actions">
     <button name="target" value="server" type="submit">{{tr .Lang "build_server"}}</button>
+  </form>
+  <h2>{{tr .Lang "client_platforms"}}</h2>
+  <table class="platform-table">
+    <tr>
+      <th>{{tr .Lang "platform"}}</th>
+      <th>{{tr .Lang "filename"}}</th>
+      <th>{{tr .Lang "state"}}</th>
+      <th>{{tr .Lang "download"}}</th>
+    </tr>
+    {{range .Platforms}}
+    <tr>
+      <td><label class="radio-line"><input type="radio" name="platform" value="{{.Key}}" form="client-build-form" required> {{tr $.Lang .LabelKey}}</label></td>
+      <td>{{.Filename}}</td>
+      <td><span class="badge">{{state $.Lang .State}}</span></td>
+      <td>{{if .URL}}<a href="{{.URL}}">{{tr $.Lang "download"}}</a>{{end}}</td>
+    </tr>
+    {{end}}
+    <tr><th>client.yml</th><td>client.yml</td><td><span class="badge">{{state .Lang "ok"}}</span></td><td><a href="/download/client.yml">{{tr .Lang "download"}}</a></td></tr>
+  </table>
+  <form id="client-build-form" method="post" action="/build" class="actions build-actions">
     <button name="target" value="client" type="submit">{{tr .Lang "build_client"}}</button>
   </form>
   {{if .BuildOutput}}<pre class="logs">{{.BuildOutput}}</pre>{{end}}
@@ -291,6 +299,9 @@ h2 { font-size: 18px; }
   align-items: stretch;
   margin-bottom: 18px;
 }
+.deploy-doc {
+  margin-bottom: 18px;
+}
 .snippet {
   margin: 0;
   padding: 12px;
@@ -402,6 +413,20 @@ button:hover { filter: brightness(0.95); }
 .build-actions {
   margin-top: 16px;
 }
+.server-actions {
+  margin-bottom: 22px;
+}
+.radio-line {
+  display: flex;
+  grid-auto-flow: unset;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 700;
+}
+.radio-line input {
+  width: auto;
+}
 .next {
   display: flex;
   align-items: center;
@@ -459,6 +484,16 @@ table {
 .compact-table td:last-child {
   width: 90px;
   text-align: right;
+}
+.deploy-table th:first-child {
+  width: 170px;
+}
+.platform-table th:first-child,
+.platform-table td:first-child {
+  width: 240px;
+}
+.platform-table td:nth-child(2) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 th, td {
   padding: 9px 0;
