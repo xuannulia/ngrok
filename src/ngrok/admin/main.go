@@ -146,6 +146,7 @@ type clientPlatform struct {
 type setupStep struct {
 	Key    string
 	Title  string
+	Help   string
 	State  string
 	Detail string
 	URL    string
@@ -177,6 +178,8 @@ type viewData struct {
 	CertDir     string
 	EnvPath     string
 	Addr        string
+	ServerIP    string
+	DNSRecords  string
 	Now         string
 }
 
@@ -312,19 +315,21 @@ func (a *app) baseData(r *http.Request, title, page string) viewData {
 	lang := requestLang(r)
 	nginxPath := detectNginxPath(cfg, a.opts.nginxPath)
 	return viewData{
-		Title:     tr(lang, title),
-		Page:      page,
-		Lang:      lang,
-		Authed:    a.currentUser(r) != "",
-		Message:   messageText(lang, r.URL.Query().Get("msg")),
-		Error:     r.URL.Query().Get("err"),
-		Config:    cfg,
-		NginxPath: nginxPath,
-		WorkDir:   a.opts.workDir,
-		CertDir:   a.opts.certDir,
-		EnvPath:   a.opts.envPath,
-		Addr:      a.opts.addr,
-		Now:       time.Now().Format(time.RFC3339),
+		Title:      tr(lang, title),
+		Page:       page,
+		Lang:       lang,
+		Authed:     a.currentUser(r) != "",
+		Message:    messageText(lang, r.URL.Query().Get("msg")),
+		Error:      r.URL.Query().Get("err"),
+		Config:     cfg,
+		NginxPath:  nginxPath,
+		WorkDir:    a.opts.workDir,
+		CertDir:    a.opts.certDir,
+		EnvPath:    a.opts.envPath,
+		Addr:       a.opts.addr,
+		ServerIP:   displayServerIP(r),
+		DNSRecords: dnsRecordText(cfg, displayServerIP(r)),
+		Now:        time.Now().Format(time.RFC3339),
 	}
 }
 
@@ -1186,11 +1191,7 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 	certDetail := cert.NotAfter
 	if cert.Error != "" || cert.DomainOK != "ok" || cert.WildcardOK != "ok" {
 		certState = "todo"
-		if cert.Error != "" {
-			certDetail = cert.Error
-		} else {
-			certDetail = cert.Path
-		}
+		certDetail = cert.Path
 	}
 
 	nginxState := "done"
@@ -1221,13 +1222,13 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 	}
 
 	return []setupStep{
-		{Key: "step_config", Title: "deploy_step_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
-		{Key: "step_dns", Title: "deploy_step_dns", State: dnsStepState(cfg), Detail: dnsStepDetail(cfg), URL: "/", Action: "refresh_dns"},
-		{Key: "step_certificate", Title: "deploy_step_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
-		{Key: "step_nginx", Title: "deploy_step_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
-		{Key: "step_build", Title: "deploy_step_build", State: buildState, Detail: buildDetail, URL: "/build", Action: "open"},
-		{Key: "step_service", Title: "deploy_step_service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "open"},
-		{Key: "step_download", Title: "deploy_step_download", State: downloadState, Detail: downloadDetail, URL: "/build", Action: "open"},
+		{Key: "step_config", Title: "deploy_step_basic", Help: "deploy_help_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
+		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", State: dnsStepState(cfg), Detail: dnsStepDetail(cfg), URL: "/", Action: "refresh_dns"},
+		{Key: "step_certificate", Title: "deploy_step_cert", Help: "deploy_help_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
+		{Key: "step_nginx", Title: "deploy_step_nginx", Help: "deploy_help_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
+		{Key: "step_build", Title: "deploy_step_build", Help: "deploy_help_build", State: buildState, Detail: buildDetail, URL: "/build", Action: "open"},
+		{Key: "step_service", Title: "deploy_step_service", Help: "deploy_help_service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "open"},
+		{Key: "step_download", Title: "deploy_step_download", Help: "deploy_help_download", State: downloadState, Detail: downloadDetail, URL: "/build", Action: "open"},
 	}
 }
 
@@ -1359,6 +1360,27 @@ func domainDNSChecks(domains []string) []checkItem {
 		checks = append(checks, dnsCheck("*."+domain, "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+domain))
 	}
 	return checks
+}
+
+func displayServerIP(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return "<server-ip>"
+	}
+	return ip.String()
+}
+
+func dnsRecordText(cfg serverConfig, serverIP string) string {
+	cfg.applyDefaults()
+	if serverIP == "" {
+		serverIP = "<server-ip>"
+	}
+	return fmt.Sprintf("%s A/AAAA %s\n*.%s A/AAAA %s", cfg.ControlHost, serverIP, cfg.Domain, serverIP)
 }
 
 func domainCertRows(certDir string, domains []string, cfg serverConfig) []domainCertRow {
@@ -1544,14 +1566,14 @@ func buildSummary(server, serverLive binaryItem, clients []clientPlatform) strin
 			built = append(built, client.Filename)
 		}
 	}
-	serverState := "server missing"
+	serverState := server.Path
 	if server.State == "ok" && serverLive.State == "ok" {
-		serverState = "server installed"
+		serverState = serverLive.Path
 	} else if server.State == "ok" {
-		serverState = "server not installed"
+		serverState = server.Path + " -> " + serverLive.Path
 	}
 	if len(built) == 0 {
-		return serverState + " / client missing"
+		return serverState + " / ngrok-*"
 	}
 	return serverState + " / " + strings.Join(built, ", ")
 }
@@ -1564,7 +1586,7 @@ func downloadSummary(clients []clientPlatform) string {
 		}
 	}
 	if len(built) == 0 {
-		return "client binary missing"
+		return "ngrok-* / client.yml"
 	}
 	return strings.Join(built, ", ") + " / client.yml"
 }

@@ -70,21 +70,22 @@ const pageHTML = `{{define "layout"}}
 {{define "dashboard"}}
 <section class="panel">
   <h1>{{tr .Lang "guide_title"}}</h1>
-  <div class="deploy-doc">
-    <h2>{{tr .Lang "guide_dns_title"}}</h2>
-    <pre class="snippet">{{.Config.ControlHost}} A/AAAA &lt;server-ip&gt;
-*.{{.Config.Domain}} A/AAAA &lt;server-ip&gt;</pre>
-  </div>
-  <table class="steps-table deploy-table">
+  <div class="deploy-steps">
     {{range .Steps}}
-    <tr>
-      <th>{{tr $.Lang .Title}}</th>
-      <td>{{.Detail}}</td>
-      <td><span class="badge">{{state $.Lang .State}}</span></td>
-      <td><a href="{{.URL}}">{{tr $.Lang .Action}}</a></td>
-    </tr>
+    <div class="deploy-step">
+      <div class="deploy-step-main">
+        <h2>{{tr $.Lang .Title}}</h2>
+        <p>{{tr $.Lang .Help}}</p>
+        {{if eq .Key "step_dns"}}<pre class="snippet">{{$.DNSRecords}}</pre>{{end}}
+        <div class="step-result"><span>{{tr $.Lang "current_result"}}</span>{{.Detail}}</div>
+      </div>
+      <div class="deploy-step-side">
+        <span class="badge">{{state $.Lang .State}}</span>
+        <a href="{{.URL}}">{{tr $.Lang .Action}}</a>
+      </div>
+    </div>
     {{end}}
-  </table>
+  </div>
 </section>
 {{end}}
 
@@ -303,6 +304,54 @@ h2 { font-size: 18px; }
 }
 .deploy-doc {
   margin-bottom: 18px;
+}
+.deploy-steps {
+  display: grid;
+  gap: 0;
+}
+.deploy-step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 18px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.deploy-step:first-child {
+  padding-top: 0;
+}
+.deploy-step:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.deploy-step-main h2 {
+  margin-bottom: 8px;
+}
+.deploy-step-main p {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.deploy-step-side {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.deploy-step-side a {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+.step-result {
+  display: flex;
+  gap: 10px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.step-result span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 700;
 }
 .snippet {
   margin: 0;
@@ -544,6 +593,8 @@ th {
   .top { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
   .grid, .form-grid { grid-template-columns: 1fr; }
   .setup-main { grid-template-columns: 1fr; }
+  .deploy-step { grid-template-columns: 1fr; gap: 10px; }
+  .deploy-step-side { justify-content: flex-start; }
   .language { margin-left: 0; }
   .step { grid-template-columns: 1fr; }
   main { width: min(100vw - 20px, 1180px); margin-top: 16px; }
