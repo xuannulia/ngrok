@@ -28,6 +28,7 @@ install -d -m 0755 "$PREFIX/bin"
 
 install -m 0755 "$ROOT_DIR/bin/ngrokd" "$PREFIX/bin/ngrokd"
 install -m 0755 "$ROOT_DIR/bin/ngrok" "$PREFIX/bin/ngrok"
+install -m 0755 "$ROOT_DIR/bin/ngrok-admin" "$PREFIX/bin/ngrok-admin"
 
 if [ ! -f "$SYSCONFDIR/ngrokd.env" ]; then
   install -o root -g "$GROUP_NAME" -m 0640 "$ROOT_DIR/deploy/systemd/ngrokd.env.example" "$SYSCONFDIR/ngrokd.env"
@@ -40,6 +41,7 @@ fi
 install -m 0644 "$ROOT_DIR/deploy/systemd/ngrokd.service" "$UNITDIR/ngrokd.service"
 install -m 0644 "$ROOT_DIR/deploy/systemd/ngrokd-privileged-ports.service" "$UNITDIR/ngrokd-privileged-ports.service"
 install -m 0644 "$ROOT_DIR/deploy/systemd/ngrok-client@.service" "$UNITDIR/ngrok-client@.service"
+install -m 0644 "$ROOT_DIR/deploy/systemd/ngrok-admin.service" "$UNITDIR/ngrok-admin.service"
 
 systemctl daemon-reload
 
@@ -52,6 +54,10 @@ Edit:
 
 Start server:
   systemctl enable --now ngrokd
+
+Start admin panel:
+  systemctl start ngrok-admin
+  journalctl -u ngrok-admin -n 20 --no-pager
 
 Start client tunnels from $SYSCONFDIR/client.yml:
   systemctl enable --now ngrok-client@client

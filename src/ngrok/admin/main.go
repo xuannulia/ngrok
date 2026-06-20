@@ -1,0 +1,1109 @@
+package admin
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"html/template"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	defaultAddr        = "127.0.0.1:9090"
+	defaultStatePath   = "/etc/ngrok/admin.json"
+	defaultEnvPath     = "/etc/ngrok/ngrokd.env"
+	defaultClientPath  = "/etc/ngrok/client.yml"
+	defaultNginxPath   = "/etc/nginx/conf.d/ngrok.conf"
+	defaultServiceName = "ngrokd"
+	sessionCookie      = "ngrok_admin_session"
+	passwordIterations = 210000
+)
+
+type options struct {
+	addr        string
+	statePath   string
+	envPath     string
+	clientPath  string
+	nginxPath   string
+	serviceName string
+	timeout     time.Duration
+}
+
+type app struct {
+	opts     options
+	state    adminState
+	setupKey string
+
+	mu       sync.Mutex
+	sessions map[string]time.Time
+}
+
+type adminState struct {
+	Username     string `json:"username"`
+	Salt         string `json:"salt"`
+	PasswordHash string `json:"password_hash"`
+	Iterations   int    `json:"iterations"`
+	CreatedAt    string `json:"created_at"`
+}
+
+type serverConfig struct {
+	Domain         string
+	ControlHost    string
+	TLSCrt         string
+	TLSKey         string
+	AuthToken      string
+	HTTPAddr       string
+	HTTPSAddr      string
+	TunnelAddr     string
+	LogLevel       string
+	MaxConnections string
+	ExtraArgs      string
+}
+
+type certStatus struct {
+	Path       string
+	Subject    string
+	Issuer     string
+	NotAfter   string
+	DNSNames   string
+	DomainOK   string
+	WildcardOK string
+	Error      string
+}
+
+type serviceStatus struct {
+	State string
+	Error string
+	Logs  string
+}
+
+type checkItem struct {
+	Name   string
+	State  string
+	Detail string
+}
+
+type viewData struct {
+	Title        string
+	Page         string
+	Authed       bool
+	Message      string
+	Error        string
+	Config       serverConfig
+	Cert         certStatus
+	Service      serviceStatus
+	Checks       []checkItem
+	ClientConfig string
+	NginxConfig  string
+	NginxPath    string
+	ClientPath   string
+	EnvPath      string
+	Addr         string
+	Now          string
+}
+
+func Main() {
+	var opts options
+	flag.StringVar(&opts.addr, "addr", defaultAddr, "admin listen address")
+	flag.StringVar(&opts.statePath, "state", defaultStatePath, "admin state file")
+	flag.StringVar(&opts.envPath, "env", defaultEnvPath, "ngrokd environment file")
+	flag.StringVar(&opts.clientPath, "client-config", defaultClientPath, "client config output path")
+	flag.StringVar(&opts.nginxPath, "nginx-conf", defaultNginxPath, "nginx config output path")
+	flag.StringVar(&opts.serviceName, "service", defaultServiceName, "systemd service name")
+	flag.DurationVar(&opts.timeout, "timeout", 90*time.Second, "command timeout")
+	flag.Parse()
+
+	a, err := newApp(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngrok-admin: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("ngrok admin listening on http://%s\n", opts.addr)
+	if !a.hasAdmin() {
+		fmt.Printf("setup key: %s\n", a.setupKey)
+	}
+
+	srv := &http.Server{
+		Addr:              opts.addr,
+		Handler:           a.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "ngrok-admin: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func newApp(opts options) (*app, error) {
+	state, err := loadAdminState(opts.statePath)
+	if err != nil {
+		return nil, err
+	}
+	setupKey := ""
+	if state.Username == "" {
+		setupKey, err = randomKey()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &app{
+		opts:     opts,
+		state:    state,
+		setupKey: setupKey,
+		sessions: make(map[string]time.Time),
+	}, nil
+}
+
+func (a *app) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", a.handleHome)
+	mux.HandleFunc("/setup", a.handleSetup)
+	mux.HandleFunc("/login", a.handleLogin)
+	mux.HandleFunc("/logout", a.handleLogout)
+	mux.HandleFunc("/config", a.handleConfig)
+	mux.HandleFunc("/certificate", a.handleCertificate)
+	mux.HandleFunc("/certificate/issue", a.handleCertificateIssue)
+	mux.HandleFunc("/nginx", a.handleNginx)
+	mux.HandleFunc("/service", a.handleService)
+	mux.HandleFunc("/client", a.handleClient)
+	mux.HandleFunc("/static/style.css", handleStyle)
+	return mux
+}
+
+func (a *app) hasAdmin() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state.Username != ""
+}
+
+func (a *app) baseData(r *http.Request, title, page string) viewData {
+	cfg := readServerConfig(a.opts.envPath)
+	return viewData{
+		Title:      title,
+		Page:       page,
+		Authed:     a.currentUser(r) != "",
+		Message:    r.URL.Query().Get("msg"),
+		Error:      r.URL.Query().Get("err"),
+		Config:     cfg,
+		NginxPath:  a.opts.nginxPath,
+		ClientPath: a.opts.clientPath,
+		EnvPath:    a.opts.envPath,
+		Addr:       a.opts.addr,
+		Now:        time.Now().Format(time.RFC3339),
+	}
+}
+
+func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if !a.hasAdmin() {
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
+	if !a.requireAuth(w, r) {
+		return
+	}
+	data := a.baseData(r, "Dashboard", "dashboard")
+	data.Cert = readCertStatus(data.Config)
+	data.Service = readServiceStatus(a.opts.serviceName)
+	data.Checks = runChecks(data.Config, a.opts)
+	render(w, data)
+}
+
+func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if a.hasAdmin() {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Setup", "setup", err)
+			return
+		}
+		if r.Form.Get("setup_key") != a.setupKey {
+			a.renderError(w, r, "Setup", "setup", errors.New("invalid setup key"))
+			return
+		}
+		username := strings.TrimSpace(r.Form.Get("username"))
+		password := r.Form.Get("password")
+		if username == "" || password == "" {
+			a.renderError(w, r, "Setup", "setup", errors.New("username and password are required"))
+			return
+		}
+		if len(password) < 10 {
+			a.renderError(w, r, "Setup", "setup", errors.New("password is too short"))
+			return
+		}
+		state, err := newAdminState(username, password)
+		if err != nil {
+			a.renderError(w, r, "Setup", "setup", err)
+			return
+		}
+		if err := saveAdminState(a.opts.statePath, state); err != nil {
+			a.renderError(w, r, "Setup", "setup", err)
+			return
+		}
+		a.mu.Lock()
+		a.state = state
+		a.setupKey = ""
+		a.mu.Unlock()
+		a.setSession(w, username)
+		http.Redirect(w, r, "/config?msg=admin%20ready", http.StatusFound)
+		return
+	}
+	render(w, a.baseData(r, "Setup", "setup"))
+}
+
+func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.hasAdmin() {
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Login", "login", err)
+			return
+		}
+		username := strings.TrimSpace(r.Form.Get("username"))
+		password := r.Form.Get("password")
+		if a.checkPassword(username, password) {
+			a.setSession(w, username)
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		a.renderError(w, r, "Login", "login", errors.New("login failed"))
+		return
+	}
+	render(w, a.baseData(r, "Login", "login"))
+}
+
+func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
+	a.clearSession(w, r)
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Config", "config", err)
+			return
+		}
+		cfg := serverConfig{
+			Domain:         strings.TrimSpace(r.Form.Get("domain")),
+			ControlHost:    strings.TrimSpace(r.Form.Get("control_host")),
+			TLSCrt:         strings.TrimSpace(r.Form.Get("tls_crt")),
+			TLSKey:         strings.TrimSpace(r.Form.Get("tls_key")),
+			AuthToken:      strings.TrimSpace(r.Form.Get("auth_token")),
+			HTTPAddr:       strings.TrimSpace(r.Form.Get("http_addr")),
+			HTTPSAddr:      strings.TrimSpace(r.Form.Get("https_addr")),
+			TunnelAddr:     strings.TrimSpace(r.Form.Get("tunnel_addr")),
+			LogLevel:       strings.TrimSpace(r.Form.Get("log_level")),
+			MaxConnections: strings.TrimSpace(r.Form.Get("max_connections")),
+			ExtraArgs:      strings.TrimSpace(r.Form.Get("extra_args")),
+		}
+		if r.Form.Get("new_token") == "1" || cfg.AuthToken == "" {
+			token, err := randomToken()
+			if err != nil {
+				a.renderError(w, r, "Config", "config", err)
+				return
+			}
+			cfg.AuthToken = token
+		}
+		cfg.applyDefaults()
+		if err := cfg.validate(); err != nil {
+			a.renderErrorWithConfig(w, r, "Config", "config", err, cfg)
+			return
+		}
+		if err := writeServerConfig(a.opts.envPath, cfg); err != nil {
+			a.renderErrorWithConfig(w, r, "Config", "config", err, cfg)
+			return
+		}
+		http.Redirect(w, r, "/config?msg=config%20saved", http.StatusFound)
+		return
+	}
+	render(w, a.baseData(r, "Config", "config"))
+}
+
+func (a *app) handleCertificate(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	data := a.baseData(r, "Certificate", "certificate")
+	data.Cert = readCertStatus(data.Config)
+	render(w, data)
+}
+
+func (a *app) handleCertificateIssue(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/certificate", http.StatusFound)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		a.renderError(w, r, "Certificate", "certificate", err)
+		return
+	}
+	cfg := readServerConfig(a.opts.envPath)
+	cfg.applyDefaults()
+	dnsPlugin := strings.TrimSpace(r.Form.Get("dns_plugin"))
+	accountEmail := strings.TrimSpace(r.Form.Get("account_email"))
+	envText := r.Form.Get("env_vars")
+	out, err := issueWithAcmeSH(cfg, dnsPlugin, accountEmail, envText, a.opts.timeout)
+	data := a.baseData(r, "Certificate", "certificate")
+	data.Cert = readCertStatus(data.Config)
+	data.Message = tail(out, 4000)
+	if err != nil {
+		data.Error = err.Error()
+	}
+	render(w, data)
+}
+
+func (a *app) handleNginx(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	cfg := readServerConfig(a.opts.envPath)
+	cfg.applyDefaults()
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Nginx", "nginx", err)
+			return
+		}
+		path := strings.TrimSpace(r.Form.Get("path"))
+		if path == "" {
+			path = a.opts.nginxPath
+		}
+		action := r.Form.Get("action")
+		var err error
+		var msg string
+		switch action {
+		case "write":
+			err = writeFileRoot(path, []byte(nginxConfig(cfg)), 0644)
+			msg = "nginx config written"
+		case "test":
+			msg, err = runCommand(a.opts.timeout, nil, "nginx", "-t")
+		case "reload":
+			msg, err = runCommand(a.opts.timeout, nil, "systemctl", "reload", "nginx")
+		default:
+			err = errors.New("unknown action")
+		}
+		data := a.baseData(r, "Nginx", "nginx")
+		data.NginxConfig = nginxConfig(cfg)
+		data.NginxPath = path
+		data.Message = tail(msg, 4000)
+		if err != nil {
+			data.Error = err.Error()
+		}
+		render(w, data)
+		return
+	}
+	data := a.baseData(r, "Nginx", "nginx")
+	data.NginxConfig = nginxConfig(cfg)
+	render(w, data)
+}
+
+func (a *app) handleService(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			a.renderError(w, r, "Service", "service", err)
+			return
+		}
+		action := r.Form.Get("action")
+		var out string
+		var err error
+		switch action {
+		case "start":
+			out, err = runCommand(a.opts.timeout, nil, "systemctl", "enable", "--now", a.opts.serviceName)
+		case "restart":
+			out, err = runCommand(a.opts.timeout, nil, "systemctl", "restart", a.opts.serviceName)
+		case "stop":
+			out, err = runCommand(a.opts.timeout, nil, "systemctl", "stop", a.opts.serviceName)
+		default:
+			err = errors.New("unknown action")
+		}
+		data := a.baseData(r, "Service", "service")
+		data.Service = readServiceStatus(a.opts.serviceName)
+		data.Message = tail(out, 4000)
+		if err != nil {
+			data.Error = err.Error()
+		}
+		render(w, data)
+		return
+	}
+	data := a.baseData(r, "Service", "service")
+	data.Service = readServiceStatus(a.opts.serviceName)
+	render(w, data)
+}
+
+func (a *app) handleClient(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	cfg := readServerConfig(a.opts.envPath)
+	cfg.applyDefaults()
+	client := clientConfig(cfg)
+	if r.Method == http.MethodPost {
+		if err := writeFileRoot(a.opts.clientPath, []byte(client), 0640); err != nil {
+			data := a.baseData(r, "Client", "client")
+			data.ClientConfig = client
+			data.Error = err.Error()
+			render(w, data)
+			return
+		}
+		http.Redirect(w, r, "/client?msg=client%20config%20written", http.StatusFound)
+		return
+	}
+	data := a.baseData(r, "Client", "client")
+	data.ClientConfig = client
+	render(w, data)
+}
+
+func (a *app) renderError(w http.ResponseWriter, r *http.Request, title, page string, err error) {
+	data := a.baseData(r, title, page)
+	data.Error = err.Error()
+	render(w, data)
+}
+
+func (a *app) renderErrorWithConfig(w http.ResponseWriter, r *http.Request, title, page string, err error, cfg serverConfig) {
+	data := a.baseData(r, title, page)
+	data.Config = cfg
+	data.Error = err.Error()
+	render(w, data)
+}
+
+func (a *app) requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	if !a.hasAdmin() {
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return false
+	}
+	if a.currentUser(r) == "" {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return false
+	}
+	return true
+}
+
+func (a *app) currentUser(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil || cookie.Value == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	exp, ok := a.sessions[cookie.Value]
+	if !ok || time.Now().After(exp) {
+		delete(a.sessions, cookie.Value)
+		return ""
+	}
+	return a.state.Username
+}
+
+func (a *app) setSession(w http.ResponseWriter, username string) {
+	id, err := randomSessionID()
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	a.sessions[id] = time.Now().Add(12 * time.Hour)
+	a.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  time.Now().Add(12 * time.Hour),
+	})
+}
+
+func (a *app) clearSession(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		a.mu.Lock()
+		delete(a.sessions, cookie.Value)
+		a.mu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
+}
+
+func (a *app) checkPassword(username, password string) bool {
+	a.mu.Lock()
+	state := a.state
+	a.mu.Unlock()
+	if username != state.Username || state.Username == "" {
+		return false
+	}
+	salt, err := base64.StdEncoding.DecodeString(state.Salt)
+	if err != nil {
+		return false
+	}
+	want, err := base64.StdEncoding.DecodeString(state.PasswordHash)
+	if err != nil {
+		return false
+	}
+	got := pbkdf2SHA256([]byte(password), salt, state.Iterations, len(want))
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+func loadAdminState(path string) (adminState, error) {
+	var state adminState
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return state, nil
+	}
+	err = json.Unmarshal(b, &state)
+	return state, err
+}
+
+func newAdminState(username, password string) (adminState, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return adminState{}, err
+	}
+	hash := pbkdf2SHA256([]byte(password), salt, passwordIterations, 32)
+	return adminState{
+		Username:     username,
+		Salt:         base64.StdEncoding.EncodeToString(salt),
+		PasswordHash: base64.StdEncoding.EncodeToString(hash),
+		Iterations:   passwordIterations,
+		CreatedAt:    time.Now().Format(time.RFC3339),
+	}, nil
+}
+
+func saveAdminState(path string, state adminState) error {
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileRoot(path, append(b, '\n'), 0600)
+}
+
+func writeFileRoot(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return err
+	}
+	uid, gid := fileOwner(path)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return err
+	}
+	if uid >= 0 || gid >= 0 {
+		if err := os.Chown(tmp, uid, gid); err != nil && os.Geteuid() == 0 {
+			return err
+		}
+	}
+	return os.Rename(tmp, path)
+}
+
+func fileOwner(path string) (int, int) {
+	if st, err := os.Stat(path); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			return int(sys.Uid), int(sys.Gid)
+		}
+	}
+	if st, err := os.Stat(filepath.Dir(path)); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			return os.Geteuid(), int(sys.Gid)
+		}
+	}
+	return -1, -1
+}
+
+func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
+	hLen := 32
+	numBlocks := (keyLen + hLen - 1) / hLen
+	var out []byte
+	for block := 1; block <= numBlocks; block++ {
+		mac := hmac.New(sha256.New, password)
+		mac.Write(salt)
+		mac.Write([]byte{byte(block >> 24), byte(block >> 16), byte(block >> 8), byte(block)})
+		u := mac.Sum(nil)
+		t := make([]byte, len(u))
+		copy(t, u)
+		for i := 1; i < iter; i++ {
+			mac = hmac.New(sha256.New, password)
+			mac.Write(u)
+			u = mac.Sum(nil)
+			for j := range t {
+				t[j] ^= u[j]
+			}
+		}
+		out = append(out, t...)
+	}
+	return out[:keyLen]
+}
+
+func randomKey() (string, error) {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	hexed := hex.EncodeToString(b)
+	return hexed[0:4] + "-" + hexed[4:8] + "-" + hexed[8:12] + "-" + hexed[12:], nil
+}
+
+func randomSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func readServerConfig(path string) serverConfig {
+	cfg := defaultServerConfig()
+	values := readEnvFile(path)
+	cfg.Domain = first(values["NGROKD_DOMAIN"], cfg.Domain)
+	cfg.ControlHost = first(values["NGROKD_CONTROL_HOST"], cfg.ControlHost)
+	cfg.TLSCrt = first(values["NGROKD_TLS_CRT"], cfg.TLSCrt)
+	cfg.TLSKey = first(values["NGROKD_TLS_KEY"], cfg.TLSKey)
+	cfg.AuthToken = first(values["NGROKD_AUTH_TOKEN"], cfg.AuthToken)
+	cfg.HTTPAddr = first(values["NGROKD_HTTP_ADDR"], cfg.HTTPAddr)
+	cfg.HTTPSAddr = first(values["NGROKD_HTTPS_ADDR"], cfg.HTTPSAddr)
+	cfg.TunnelAddr = first(values["NGROKD_TUNNEL_ADDR"], cfg.TunnelAddr)
+	cfg.LogLevel = first(values["NGROKD_LOG_LEVEL"], cfg.LogLevel)
+	cfg.MaxConnections = first(values["NGROKD_MAX_CONNECTIONS"], cfg.MaxConnections)
+	cfg.ExtraArgs = first(values["NGROKD_EXTRA_ARGS"], cfg.ExtraArgs)
+	cfg.applyDefaults()
+	return cfg
+}
+
+func defaultServerConfig() serverConfig {
+	return serverConfig{
+		Domain:         "example.com",
+		ControlHost:    "ngrok.example.com",
+		TLSCrt:         "/etc/ngrok/tls/fullchain.pem",
+		TLSKey:         "/etc/ngrok/tls/privkey.pem",
+		HTTPAddr:       "127.0.0.1:8080",
+		HTTPSAddr:      "",
+		TunnelAddr:     "0.0.0.0:4443",
+		LogLevel:       "INFO",
+		MaxConnections: "1024",
+	}
+}
+
+func (c *serverConfig) applyDefaults() {
+	if c.Domain == "" {
+		c.Domain = "example.com"
+	}
+	if c.ControlHost == "" || strings.HasPrefix(c.ControlHost, "ngrok.example.") {
+		c.ControlHost = "ngrok." + c.Domain
+	}
+	if c.TLSCrt == "" {
+		c.TLSCrt = "/etc/ngrok/tls/fullchain.pem"
+	}
+	if c.TLSKey == "" {
+		c.TLSKey = "/etc/ngrok/tls/privkey.pem"
+	}
+	if c.HTTPAddr == "" {
+		c.HTTPAddr = "127.0.0.1:8080"
+	}
+	if c.TunnelAddr == "" {
+		c.TunnelAddr = "0.0.0.0:4443"
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = "INFO"
+	}
+	if c.MaxConnections == "" {
+		c.MaxConnections = "1024"
+	}
+}
+
+func (c serverConfig) validate() error {
+	if c.Domain == "" {
+		return errors.New("domain is required")
+	}
+	if strings.ContainsAny(c.Domain, " /") {
+		return errors.New("domain is invalid")
+	}
+	if c.ControlHost == "" {
+		return errors.New("control host is required")
+	}
+	if c.TLSCrt == "" || c.TLSKey == "" {
+		return errors.New("certificate and key paths are required")
+	}
+	if c.AuthToken == "" || c.AuthToken == "change-me-long-random-token" {
+		return errors.New("auth token is required")
+	}
+	if _, err := strconv.Atoi(c.MaxConnections); err != nil {
+		return errors.New("max connections must be a number")
+	}
+	return nil
+}
+
+func writeServerConfig(path string, cfg serverConfig) error {
+	cfg.applyDefaults()
+	var b strings.Builder
+	b.WriteString("# Managed by ngrok-admin.\n")
+	writeEnv(&b, "NGROKD_DOMAIN", cfg.Domain)
+	writeEnv(&b, "NGROKD_CONTROL_HOST", cfg.ControlHost)
+	writeEnv(&b, "NGROKD_TLS_CRT", cfg.TLSCrt)
+	writeEnv(&b, "NGROKD_TLS_KEY", cfg.TLSKey)
+	writeEnv(&b, "NGROKD_AUTH_TOKEN", cfg.AuthToken)
+	writeEnv(&b, "NGROKD_HTTP_ADDR", cfg.HTTPAddr)
+	writeEnv(&b, "NGROKD_HTTPS_ADDR", cfg.HTTPSAddr)
+	writeEnv(&b, "NGROKD_TUNNEL_ADDR", cfg.TunnelAddr)
+	writeEnv(&b, "NGROKD_LOG_LEVEL", cfg.LogLevel)
+	writeEnv(&b, "NGROKD_MAX_CONNECTIONS", cfg.MaxConnections)
+	writeEnv(&b, "NGROKD_EXTRA_ARGS", cfg.ExtraArgs)
+	return writeFileRoot(path, []byte(b.String()), 0640)
+}
+
+func readEnvFile(path string) map[string]string {
+	values := make(map[string]string)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func writeEnv(b *strings.Builder, key, value string) {
+	b.WriteString(key)
+	b.WriteByte('=')
+	b.WriteString(envValue(value))
+	b.WriteByte('\n')
+}
+
+func envValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		if !(r == '/' || r == ':' || r == '.' || r == '-' || r == '_' || r == ',' || r == '=' || r == '*' || r == '@' || r == '+' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return strconv.Quote(value)
+		}
+	}
+	return value
+}
+
+func readCertStatus(cfg serverConfig) certStatus {
+	cfg.applyDefaults()
+	status := certStatus{Path: cfg.TLSCrt}
+	b, err := os.ReadFile(cfg.TLSCrt)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		status.Error = "no PEM certificate found"
+		return status
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+	status.Subject = cert.Subject.CommonName
+	status.Issuer = cert.Issuer.CommonName
+	status.NotAfter = cert.NotAfter.Format("2006-01-02 15:04 MST")
+	status.DNSNames = strings.Join(cert.DNSNames, ", ")
+	status.DomainOK = boolState(cert.VerifyHostname(cfg.Domain) == nil)
+	status.WildcardOK = boolState(cert.VerifyHostname("test."+cfg.Domain) == nil)
+	return status
+}
+
+func readServiceStatus(service string) serviceStatus {
+	out, err := exec.Command("systemctl", "is-active", service).CombinedOutput()
+	status := serviceStatus{State: strings.TrimSpace(string(out))}
+	if err != nil {
+		if status.State == "" {
+			status.State = "unavailable"
+		}
+		status.Error = err.Error()
+	}
+	logs, logErr := exec.Command("journalctl", "-u", service, "-n", "80", "--no-pager").CombinedOutput()
+	if logErr == nil {
+		status.Logs = string(logs)
+	}
+	return status
+}
+
+func runChecks(cfg serverConfig, opts options) []checkItem {
+	cfg.applyDefaults()
+	var checks []checkItem
+	checks = append(checks, pathCheck("env", opts.envPath))
+	checks = append(checks, pathCheck("certificate", cfg.TLSCrt))
+	checks = append(checks, pathCheck("private key", cfg.TLSKey))
+	checks = append(checks, dnsCheck("control DNS", cfg.ControlHost))
+	checks = append(checks, dnsCheck("wildcard DNS", "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+cfg.Domain))
+	checks = append(checks, tcpCheck("tunnel port", cfg.ControlHost, tunnelPort(cfg.TunnelAddr)))
+	checks = append(checks, pathCheck("nginx config", opts.nginxPath))
+	return checks
+}
+
+func pathCheck(name, path string) checkItem {
+	if _, err := os.Stat(path); err != nil {
+		return checkItem{Name: name, State: "missing", Detail: path}
+	}
+	return checkItem{Name: name, State: "ok", Detail: path}
+}
+
+func dnsCheck(name, host string) checkItem {
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return checkItem{Name: name, State: "fail", Detail: err.Error()}
+	}
+	return checkItem{Name: name, State: "ok", Detail: strings.Join(addrs, ", ")}
+}
+
+func tcpCheck(name, host, port string) checkItem {
+	target := net.JoinHostPort(host, port)
+	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
+	if err != nil {
+		return checkItem{Name: name, State: "fail", Detail: err.Error()}
+	}
+	_ = conn.Close()
+	return checkItem{Name: name, State: "ok", Detail: target}
+}
+
+func issueWithAcmeSH(cfg serverConfig, dnsPlugin, accountEmail, envText string, timeout time.Duration) (string, error) {
+	cfg.applyDefaults()
+	if dnsPlugin == "" {
+		return "", errors.New("dns plugin is required")
+	}
+	bin, err := findAcmeSH()
+	if err != nil {
+		return "", err
+	}
+	env := parseEnvLines(envText)
+	args := []string{"--issue", "--dns", dnsPlugin, "-d", cfg.Domain, "-d", "*." + cfg.Domain}
+	if accountEmail != "" {
+		args = append(args, "--accountemail", accountEmail)
+	}
+	out1, err := runCommand(timeout, env, bin, args...)
+	if err != nil {
+		return out1, err
+	}
+	out2, err := runCommand(timeout, env, bin, "--install-cert", "-d", cfg.Domain, "--fullchain-file", cfg.TLSCrt, "--key-file", cfg.TLSKey, "--reloadcmd", "systemctl reload nginx || true")
+	return out1 + "\n" + out2, err
+}
+
+func findAcmeSH() (string, error) {
+	if bin, err := exec.LookPath("acme.sh"); err == nil {
+		return bin, nil
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".acme.sh", "acme.sh"),
+		"/root/.acme.sh/acme.sh",
+		"/usr/local/bin/acme.sh",
+	}
+	for _, path := range candidates {
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return path, nil
+		}
+	}
+	return "", errors.New("acme.sh not found")
+}
+
+func parseEnvLines(text string) []string {
+	var env []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		env = append(env, line)
+	}
+	return env
+}
+
+func runCommand(timeout time.Duration, extraEnv []string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	timer := time.AfterFunc(timeout, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	out, err := cmd.CombinedOutput()
+	timer.Stop()
+	if err != nil {
+		return string(out), fmt.Errorf("%s: %w", strings.Join(append([]string{name}, args...), " "), err)
+	}
+	return string(out), nil
+}
+
+func nginxConfig(cfg serverConfig) string {
+	cfg.applyDefaults()
+	return fmt.Sprintf(`map $http_upgrade $connection_upgrade {
+    default upgrade;
+    "" close;
+}
+
+server {
+    listen 80;
+    server_name *.%s;
+
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_http_version 1.1;
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_pass http://%s;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name *.%s;
+
+    ssl_certificate %s;
+    ssl_certificate_key %s;
+
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_http_version 1.1;
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_pass http://%s;
+    }
+}
+`, cfg.Domain, cfg.HTTPAddr, cfg.Domain, cfg.TLSCrt, cfg.TLSKey, cfg.HTTPAddr)
+}
+
+func clientConfig(cfg serverConfig) string {
+	cfg.applyDefaults()
+	return fmt.Sprintf(`server_addr: %s:%s
+auth_token: %s
+trust_host_root_certs: true
+inspect_addr: 127.0.0.1:4040
+
+tunnels:
+  app:
+    proto:
+      http: 127.0.0.1:3000
+    subdomain: app
+`, cfg.ControlHost, tunnelPort(cfg.TunnelAddr), cfg.AuthToken)
+}
+
+func tunnelPort(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "4443"
+	}
+	return port
+}
+
+func render(w http.ResponseWriter, data viewData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := pageTemplate.ExecuteTemplate(w, "layout", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func handleStyle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	_, _ = io.WriteString(w, styleCSS)
+}
+
+func boolState(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "fail"
+}
+
+func first(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func tail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[len(s)-max:]
+}
+
+var pageTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
+	"port": tunnelPort,
+}).Parse(pageHTML))

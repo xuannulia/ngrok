@@ -2,28 +2,26 @@
 
 [English README](README.md)
 
-这是基于已归档 ngrok v1 的自托管维护分支。
+这是一个基于 ngrok v1 的自托管维护分支。原版 ngrok v1 已经归档，这个仓库保留它简单直接的使用方式，并补上现在放到公网时通常需要的东西：客户端认证、TLS 下限、连接限制、多域名、证书热更新，以及常见的服务化部署模板。
 
-目标是保留 ngrok v1 简单的使用方式，同时补齐当前公网环境下必须处理的部分：鉴权、依赖清理、多域名、证书热更新、服务化部署和更安全的默认值。
+它更适合个人、团队或私有基础设施自用。如果你想搭一个可控的内网穿透服务，这个分支可以直接作为起点；如果你要做面向外部用户售卖的商业隧道平台，它不是为那个场景设计的。
 
-它适合开发者自用、团队内网穿透、私有基础设施；不定位为商业隧道平台。
+## 这个分支改了什么
 
-## 当前能力
-
-- 服务端和客户端必须配置认证 token。
-- 服务端 TLS 最低版本为 TLS 1.2。
-- ngrok 协议消息大小有限制。
-- `-maxConnections` 限制公网连接数量。
-- 默认禁止客户端指定公网 TCP 端口。
-- HTTP inspection 请求/响应体最多保留 1 MB。
-- inspection UI 暴露到非本机地址时必须配置鉴权。
-- 支持多域名。
-- 支持通过重复 `-domainCert` 配置 SNI 证书。
-- 证书文件续期后支持热更新。
-- 提供 `systemd`、`launchd`、Nginx 模板。
+- 服务端和客户端都必须配置认证 token。
+- 服务端 TLS 监听器最低使用 TLS 1.2。
+- ngrok 协议消息有大小上限，避免异常消息占用过多资源。
+- `-maxConnections` 可以限制公网和隧道连接数。
+- 默认不允许客户端指定公网 TCP 端口。
+- HTTP inspection 最多保留 1 MB 的请求/响应体。
+- inspection UI 如果绑定到非本机地址，必须配置访问认证。
+- 支持多个基础域名。
+- 可以重复传入 `-domainCert`，为不同域名配置 SNI 证书。
+- 证书文件续期后，服务端可以在新 TLS 握手时加载新证书。
+- 提供 `systemd`、`launchd`、Nginx 配置模板。
 - 移除或替换了一批过时依赖。
 
-## 文档
+## 相关文档
 
 - [迁移说明](MIGRATION.md)
 - [安全策略](SECURITY.md)
@@ -32,39 +30,53 @@
 
 ## 构建
 
-项目仍使用原始 GOPATH 结构，直接用 Makefile：
+项目仍然沿用原来的 GOPATH 目录结构，直接使用 Makefile 构建即可：
 
 ```bash
 make all
 make release-all
 ```
 
-输出：
+构建完成后会生成：
 
 ```text
 bin/ngrok
 bin/ngrokd
 ```
 
+## Web 面板
+
+`ngrok-admin` 用于首次配置：
+
+```bash
+sudo ./bin/ngrok-admin
+```
+
+默认监听 `127.0.0.1:9090`，启动后会在终端输出 setup key。用这个 key
+创建管理员账号。
+
+面板可以写入 `ngrokd.env`、生成客户端配置、通过 `acme.sh` 申请 DNS-01
+证书、写入 Nginx 配置，并启动或重启 `ngrokd` 服务。
+
 ## 最小部署流程
 
-按下面流程可以完成一个位于 Nginx 后面的最小可用部署：
+下面是一套最小但接近实际生产环境的部署方式：Nginx 负责 80/443，`ngrokd` 负责客户端控制连接和 HTTP 隧道入口。
 
-1. 创建 DNS 记录：
+1. 先准备 DNS 记录：
 
    ```text
    ngrok.example.com A/AAAA <server-ip>
    *.example.com     A/AAAA <server-ip>
    ```
 
-2. 通过 DNS-01 签发公开 CA 泛域名证书：
+2. 通过 DNS-01 签发公开 CA 泛域名证书，证书至少覆盖：
 
    ```text
    example.com
    *.example.com
    ```
 
-3. 在服务器构建并安装：
+3. 在服务器上构建并安装服务：
 
    ```bash
    make release-all
@@ -75,6 +87,7 @@ bin/ngrokd
 
    ```text
    NGROKD_DOMAIN=example.com
+   NGROKD_CONTROL_HOST=ngrok.example.com
    NGROKD_TLS_CRT=/etc/ngrok/tls/fullchain.pem
    NGROKD_TLS_KEY=/etc/ngrok/tls/privkey.pem
    NGROKD_AUTH_TOKEN=<long-random-token>
@@ -83,8 +96,8 @@ bin/ngrokd
    NGROKD_TUNNEL_ADDR=0.0.0.0:4443
    ```
 
-5. 配置 Nginx，把 `*.example.com` 反代到 `127.0.0.1:8080`。
-   可以使用本文里的 Nginx 示例，或参考 `deploy/nginx/ngrok-http.conf`。
+5. 配置 Nginx，把 `*.example.com` 转发到 `127.0.0.1:8080`。
+   可以使用本文后面的 Nginx 示例，也可以直接参考 `deploy/nginx/ngrok-http.conf`。
 
 6. 启动服务端：
 
@@ -93,7 +106,7 @@ bin/ngrokd
    sudo systemctl status ngrokd
    ```
 
-7. 配置客户端：
+7. 准备客户端配置：
 
    ```yaml
    server_addr: ngrok.example.com:4443
@@ -113,7 +126,7 @@ bin/ngrokd
    ./bin/ngrok -config=client.yml start-all
    ```
 
-预期结果：
+访问地址应当是：
 
 ```text
 http://app.example.com
@@ -122,7 +135,7 @@ https://app.example.com
 
 ## 服务端
 
-最小启动方式：
+最小启动命令：
 
 ```bash
 ./bin/ngrokd \
@@ -132,25 +145,25 @@ https://app.example.com
   -authToken=change-me-long-random-token
 ```
 
-也可以通过环境变量提供 token：
+也可以把 token 放到环境变量里：
 
 ```bash
 NGROK_AUTH_TOKEN=change-me-long-random-token ./bin/ngrokd -domain=example.com
 ```
 
-不要在公网运行空 token、弱 token 或误共享的 token。
+不要在公网使用空 token、弱 token，也不要复用已经发给他人的 token。
 
 常用参数：
 
 ```text
--domain              主域名，subdomain 隧道只基于它生成。
--domainCert          额外域名证书映射，可重复。
+-domain              主域名。使用 subdomain 时，地址会基于这个域名生成。
+-domainCert          额外域名的证书映射，可重复传入。
 -tlsCrt              默认 TLS 证书文件。
 -tlsKey              默认 TLS 私钥文件。
--httpAddr            HTTP 隧道入口，空值表示禁用。
--httpsAddr           HTTPS 隧道入口，空值表示禁用。
--tunnelAddr          客户端控制/代理连接入口。
--authToken           客户端认证 token。
+-httpAddr            HTTP 隧道入口。设为空值表示禁用。
+-httpsAddr           HTTPS 隧道入口。设为空值表示禁用。
+-tunnelAddr          客户端控制连接和代理连接入口。
+-authToken           客户端必须使用的认证 token。
 -maxConnections      最大公网/隧道连接数，默认 1024。
 -allowRemotePorts    是否允许客户端指定 TCP 公网端口，默认 false。
 ```
@@ -172,19 +185,19 @@ tunnels:
     subdomain: app
 ```
 
-启动：
+启动所有已配置的隧道：
 
 ```bash
 ./bin/ngrok -config=client.yml start-all
 ```
 
-`subdomain: app` 只会作用于服务端主 `-domain`：
+`subdomain: app` 只会使用服务端主 `-domain`：
 
 ```text
 app.example.com
 ```
 
-如果要使用其它已配置域名，写显式 `hostname`：
+如果要使用其它已经配置到服务端的域名，请写完整的 `hostname`：
 
 ```yaml
 tunnels:
@@ -194,11 +207,11 @@ tunnels:
     hostname: app.example.net
 ```
 
-服务端会拒绝不属于已配置域名后缀的 hostname。
+服务端会拒绝不属于已配置域名后缀的 `hostname`。
 
 ## 多域名
 
-一个服务端可同时服务多个基础域名：
+一个 `ngrokd` 可以同时服务多个基础域名：
 
 ```bash
 ./bin/ngrokd \
@@ -210,30 +223,30 @@ tunnels:
   -authToken=change-me-long-random-token
 ```
 
-DNS：
+DNS 至少需要这些记录：
 
 ```text
-*.example.com    A/AAAA  <server-ip>
-*.example.net    A/AAAA  <server-ip>
-*.example.org    A/AAAA  <server-ip>
+*.example.com     A/AAAA <server-ip>
+*.example.net     A/AAAA <server-ip>
+*.example.org     A/AAAA <server-ip>
 ngrok.example.com A/AAAA <server-ip>
 ```
 
-根域名是否解析取决于你是否要直接使用根域名作为隧道地址。
+是否解析根域名取决于你是否要把根域名本身也作为隧道地址使用。
 
 ## 证书
 
-优先使用公开 CA 签发的证书。客户端配置：
+能用公开 CA 证书时，优先使用公开 CA。客户端配置：
 
 ```yaml
 trust_host_root_certs: true
 ```
 
-公开 CA 证书正常续期时，客户端不需要重新编译。
+这样公开 CA 证书正常续期时，客户端不需要重新编译。
 
 ### DNS-01 泛域名证书
 
-泛域名证书需要 DNS-01 验证。DNS 服务商不固定，只要你的 ACME 客户端能通过 API 修改 DNS 记录即可。
+泛域名证书需要 DNS-01 验证。DNS 服务商没有特殊要求，只要你使用的 ACME 客户端可以通过 API 修改 DNS 记录即可。
 
 常见 ACME 客户端：
 
@@ -267,21 +280,21 @@ certbot certonly \
   -d '*.example.com'
 ```
 
-续期后按服务用户需要安装证书文件和权限。只有 Nginx 负责浏览器 HTTPS 时才需要重载 Nginx。
+续期后，把证书和私钥安装到服务用户可读取的位置，并设置合适的文件权限。只有浏览器 HTTPS 由 Nginx 终止时，才需要重载 Nginx。
 
-如果 `ngrokd` 负责 `-tunnelAddr` 或 `-httpsAddr` 的 TLS，它通常不需要重启。它会持有当前内存证书，只在证书接近过期时检查证书/私钥文件是否变化，并在新 TLS 握手时使用新证书。已有连接不受影响。
+如果 `ngrokd` 负责 `-tunnelAddr` 或 `-httpsAddr` 的 TLS，一般不需要因为续期而重启。它会继续使用内存中的当前证书，并在证书接近过期时检查证书/私钥文件是否更新；检查成功后，新的 TLS 握手会使用新证书，已有连接不受影响。
 
-如果浏览器 HTTPS 由 Nginx 终止，证书续期后需要重载 Nginx。`ngrokd` 的证书热更新仍适用于客户端控制通道。
+如果浏览器 HTTPS 由 Nginx 终止，证书安装完成后重载 Nginx。`ngrokd` 的证书热更新仍然适用于客户端控制通道。
 
 ## 与 Nginx 并用
 
-当服务器已有 Nginx 占用 80/443 时，不要让 ngrokd 直接抢占这两个端口。
+如果服务器上已经有 Nginx 占用 80/443，不要让 `ngrokd` 直接监听这两个端口。通常有两种做法。
 
 ### 方案 A：Nginx 终止 HTTPS
 
-适合让 Nginx 统一管理公网 Web TLS，然后转发到 ngrokd HTTP 入口。
+这是最常见的方式：Nginx 统一处理浏览器 HTTPS，然后把请求转发到 `ngrokd` 的 HTTP 入口。
 
-ngrokd：
+`ngrokd`：
 
 ```bash
 ./bin/ngrokd \
@@ -345,11 +358,13 @@ server {
 }
 ```
 
+如果你希望 Nginx 管理所有公网 Web TLS，并且不让 `ngrokd` 接触 443，选这个方案。
+
 ### 方案 B：HTTPS 透传给 ngrokd
 
-适合让 ngrokd 自己终止 HTTPS 隧道，并通过 SNI 选择证书。
+如果你希望 `ngrokd` 自己终止 HTTPS 隧道流量，并通过 SNI 选择证书，可以让 Nginx 只做 TCP 透传。
 
-ngrokd：
+`ngrokd`：
 
 ```bash
 ./bin/ngrokd \
@@ -376,9 +391,9 @@ server {
 }
 ```
 
-`default` 后端应指向你原本的 HTTPS 服务，避免影响其它站点。
+`default` 后端应指向你原本的 HTTPS 服务，避免隧道域名影响其它站点。
 
-模板：
+可参考的模板：
 
 ```text
 deploy/nginx/ngrok-http.conf
@@ -397,7 +412,7 @@ sudo systemctl enable --now ngrokd
 sudo systemctl status ngrokd
 ```
 
-日志：
+查看日志：
 
 ```bash
 journalctl -u ngrokd -f
@@ -420,16 +435,16 @@ deploy/launchd/com.example.ngrok-client.plist
 
 ## 部署案例
 
-目标：
+假设要部署成下面这样：
 
 ```text
-主域名：       example.com
-额外域名：     example.net, example.org
-控制服务：     ngrok.example.com:4443
-隧道域名：     app.example.com, api.example.net, admin.example.org
-Nginx 占用：   80 和 443
-ngrokd HTTP：  127.0.0.1:8080
-ngrokd 控制端：0.0.0.0:4443
+主域名：        example.com
+额外域名：      example.net, example.org
+控制服务：      ngrok.example.com:4443
+隧道域名：      app.example.com, api.example.net, admin.example.org
+Nginx 占用：    80 和 443
+ngrokd HTTP：   127.0.0.1:8080
+ngrokd 控制端： 0.0.0.0:4443
 ```
 
 DNS：
@@ -479,7 +494,7 @@ tunnels:
     hostname: admin.example.org
 ```
 
-结果：
+最终可以访问：
 
 ```text
 http://app.example.com
@@ -495,14 +510,14 @@ https://admin.example.org
 - 使用足够长的随机 `auth_token`。
 - 客户端配置文件只允许运行客户端的用户读取。
 - 服务端环境文件只允许 root 和服务用户读取。
-- inspection UI 尽量绑定 `127.0.0.1`；如果暴露到其它地址，必须配置 `inspect_auth`。
+- inspection UI 尽量只绑定 `127.0.0.1`；如果必须暴露到其它地址，一定要配置 `inspect_auth`。
 - 不要给不可信客户端开启 `-allowRemotePorts`。
-- 公网服务前面仍应配置防火墙和限流。
-- DNS API 密钥如果进过聊天记录、日志或 issue，应轮换。
+- 公网入口前面仍然应该配置防火墙和限流。
+- DNS API 密钥如果出现在聊天记录、日志或 issue 里，应立即轮换。
 
 ## 许可证
 
 本分支使用 Apache License 2.0。见 [LICENSE](LICENSE)。
 
-本仓库包含来自 ngrok v1 的派生代码和第三方组件。见 [NOTICE](NOTICE) 和
-[MODIFICATIONS.md](MODIFICATIONS.md)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本仓库包含来自 ngrok v1 的派生代码和第三方组件。见 [NOTICE](NOTICE)、
+[MODIFICATIONS.md](MODIFICATIONS.md) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

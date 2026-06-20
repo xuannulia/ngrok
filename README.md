@@ -1,32 +1,30 @@
 # ngrok v1 self-hosted fork
 
-Maintained self-hosted fork of the archived ngrok v1 codebase.
+This repository is a self-hosted maintenance fork of ngrok v1. The original v1
+codebase is archived. This fork keeps the small, direct ngrok v1 workflow and
+adds the pieces that matter when you run it on the public internet today:
+client authentication, safer TLS defaults, connection limits, multi-domain
+support, certificate reloads, and service templates.
 
-This fork keeps the simple ngrok v1 workflow and updates the parts that matter
-for running it on today's public internet: authentication, dependency cleanup,
-multi-domain routing, certificate reload, service templates, and safer defaults.
-
-This is for developer-operated tunnel services and private infrastructure. It is
-not a commercial tunnel platform.
+It is meant for personal use, team tunnel services, and private infrastructure.
+It is not trying to be a commercial tunnel platform.
 
 [Chinese README](README.zh-CN.md)
 
-## Status
+## What Changed
 
-Implemented in this fork:
-
-- Required server/client authentication token.
-- TLS 1.2 minimum on server TLS listeners.
-- Bounded ngrok protocol message size.
-- Public connection limit with `-maxConnections`.
-- Custom TCP remote ports disabled by default.
-- HTTP inspection body capture capped at 1 MB.
-- Local inspection UI protection when exposed outside loopback.
-- Multi-domain routing.
-- SNI certificate selection with repeated `-domainCert`.
-- Certificate hot reload for renewed certificate/key files.
-- `systemd`, `launchd`, and Nginx deployment templates.
-- Reduced dependency surface; obsolete dependencies were replaced or removed.
+- The server and client must both use an authentication token.
+- Server TLS listeners require TLS 1.2 or newer.
+- ngrok protocol messages have a size limit.
+- `-maxConnections` limits accepted public and tunnel connections.
+- Clients cannot request fixed public TCP ports by default.
+- HTTP inspection stores at most 1 MB of request/response body data.
+- The inspection UI requires authentication when exposed outside loopback.
+- One server can handle multiple base domains.
+- Repeated `-domainCert` flags can provide SNI certificates for extra domains.
+- Renewed certificate files can be picked up by new TLS handshakes.
+- `systemd`, `launchd`, and Nginx templates are included.
+- Several obsolete dependencies were removed or replaced.
 
 ## Documentation
 
@@ -37,23 +35,40 @@ Implemented in this fork:
 
 ## Build
 
-This project still uses the original GOPATH layout. Use the Makefile.
+The project still uses the original GOPATH layout. Build it with the Makefile:
 
 ```bash
 make all
 make release-all
 ```
 
-Binaries:
+The binaries are written to:
 
 ```text
 bin/ngrok
 bin/ngrokd
 ```
 
+## Web Admin
+
+`ngrok-admin` provides the first-run setup panel:
+
+```bash
+sudo ./bin/ngrok-admin
+```
+
+It listens on `127.0.0.1:9090` by default and prints a setup key in the
+terminal. Use that key to create the admin account.
+
+The panel can write `ngrokd.env`, generate a client config, issue DNS-01
+certificates through `acme.sh`, write an Nginx config, and start or restart the
+`ngrokd` service.
+
 ## Minimal Deployment Flow
 
-Follow this path for the smallest production-like deployment behind Nginx:
+This is the smallest useful deployment behind Nginx: Nginx owns ports 80 and
+443, while `ngrokd` handles the client control connection and the local HTTP
+tunnel listener.
 
 1. Create DNS records:
 
@@ -62,14 +77,14 @@ Follow this path for the smallest production-like deployment behind Nginx:
    *.example.com     A/AAAA <server-ip>
    ```
 
-2. Issue a public wildcard certificate with DNS-01:
+2. Issue a public wildcard certificate with DNS-01. It should cover:
 
    ```text
    example.com
    *.example.com
    ```
 
-3. Build and install on the server:
+3. Build and install the server:
 
    ```bash
    make release-all
@@ -80,6 +95,7 @@ Follow this path for the smallest production-like deployment behind Nginx:
 
    ```text
    NGROKD_DOMAIN=example.com
+   NGROKD_CONTROL_HOST=ngrok.example.com
    NGROKD_TLS_CRT=/etc/ngrok/tls/fullchain.pem
    NGROKD_TLS_KEY=/etc/ngrok/tls/privkey.pem
    NGROKD_AUTH_TOKEN=<long-random-token>
@@ -89,7 +105,8 @@ Follow this path for the smallest production-like deployment behind Nginx:
    ```
 
 5. Configure Nginx to proxy `*.example.com` to `127.0.0.1:8080`.
-   Use the Nginx example in this README or `deploy/nginx/ngrok-http.conf`.
+   Use the example later in this README or start from
+   `deploy/nginx/ngrok-http.conf`.
 
 6. Start the server:
 
@@ -98,7 +115,7 @@ Follow this path for the smallest production-like deployment behind Nginx:
    sudo systemctl status ngrokd
    ```
 
-7. Configure a client:
+7. Create a client config:
 
    ```yaml
    server_addr: ngrok.example.com:4443
@@ -118,7 +135,7 @@ Follow this path for the smallest production-like deployment behind Nginx:
    ./bin/ngrok -config=client.yml start-all
    ```
 
-Expected result:
+The tunnel should be reachable at:
 
 ```text
 http://app.example.com
@@ -127,7 +144,7 @@ https://app.example.com
 
 ## Server
 
-Minimal server:
+Minimal server command:
 
 ```bash
 ./bin/ngrokd \
@@ -137,25 +154,26 @@ Minimal server:
   -authToken=change-me-long-random-token
 ```
 
-The token may also be supplied through the environment:
+You can also pass the token through the environment:
 
 ```bash
 NGROK_AUTH_TOKEN=change-me-long-random-token ./bin/ngrokd -domain=example.com
 ```
 
-Do not run a public server with an empty, weak, or shared-by-accident token.
+Do not put a public server online with an empty token, a weak token, or a token
+that has already been shared around.
 
 Useful server flags:
 
 ```text
--domain              Primary base domain used by subdomain tunnels.
--domainCert          Additional domain certificate mapping. Repeatable.
+-domain              Primary base domain. Subdomain tunnels are created under it.
+-domainCert          Certificate mapping for an extra domain. Repeatable.
 -tlsCrt              Default TLS certificate file.
 -tlsKey              Default TLS private key file.
 -httpAddr            Public HTTP tunnel listener. Empty disables it.
 -httpsAddr           Public HTTPS tunnel listener. Empty disables it.
--tunnelAddr          Client control/proxy listener.
--authToken           Required client token.
+-tunnelAddr          Client control and proxy listener.
+-authToken           Token required from clients.
 -maxConnections      Max accepted public/tunnel connections. Default: 1024.
 -allowRemotePorts    Allow clients to request fixed TCP remote ports. Default: false.
 ```
@@ -183,13 +201,14 @@ Start all configured tunnels:
 ./bin/ngrok -config=client.yml start-all
 ```
 
-`subdomain: app` is scoped to the server primary `-domain` only:
+`subdomain: app` only uses the server's primary `-domain`:
 
 ```text
 app.example.com
 ```
 
-To use another configured domain, request an explicit hostname:
+To use another domain that is configured on the server, request the full
+`hostname`:
 
 ```yaml
 tunnels:
@@ -199,11 +218,11 @@ tunnels:
     hostname: app.example.net
 ```
 
-The server rejects explicit hostnames outside the configured domains.
+The server rejects hostnames outside the configured domain suffixes.
 
 ## Multiple Domains
 
-Run one server with several base domains:
+One `ngrokd` process can serve several base domains:
 
 ```bash
 ./bin/ngrokd \
@@ -215,31 +234,33 @@ Run one server with several base domains:
   -authToken=change-me-long-random-token
 ```
 
-DNS requirements:
+DNS should include at least:
 
 ```text
-*.example.com   A/AAAA  <server-ip>
-*.example.net   A/AAAA  <server-ip>
-*.example.org   A/AAAA  <server-ip>
+*.example.com     A/AAAA <server-ip>
+*.example.net     A/AAAA <server-ip>
+*.example.org     A/AAAA <server-ip>
 ngrok.example.com A/AAAA <server-ip>
 ```
 
-Root-domain records are optional unless you also want tunnels on the root name.
+Root-domain records are only needed if you also want to use the root names as
+tunnel hosts.
 
 ## Certificates
 
-Use publicly trusted certificates when possible. Then clients can use:
+Use publicly trusted certificates when you can. Then clients can use:
 
 ```yaml
 trust_host_root_certs: true
 ```
 
-Clients do not need to be rebuilt when a normal public CA certificate renews.
+With public CA certificates, clients do not need to be rebuilt after normal
+certificate renewal.
 
 ### Wildcard Certificates With DNS-01
 
-Wildcard certificates require DNS-01 validation. The DNS provider does not need
-to be special; it only needs API support that your ACME client can update.
+Wildcard certificates require DNS-01 validation. Your DNS provider only needs an
+API that your ACME client can update.
 
 Common ACME clients:
 
@@ -247,7 +268,7 @@ Common ACME clients:
 - `lego`
 - `certbot` with a DNS plugin
 
-Generic renewal flow:
+Generic flow:
 
 ```bash
 # acme.sh. Replace dns_provider with the DNS plugin you use.
@@ -273,29 +294,30 @@ certbot certonly \
   -d '*.example.com'
 ```
 
-Install renewed files with owner and mode suitable for your service user. Reload
-Nginx only when Nginx terminates browser HTTPS.
+After renewal, install the certificate and key where the service user can read
+them, with suitable file permissions. Reload Nginx only when Nginx terminates
+browser HTTPS.
 
-If `ngrokd` terminates TLS for `-tunnelAddr` or `-httpsAddr`, it does not need a
-restart for normal renewals. It keeps the current certificate in memory and only
+If `ngrokd` terminates TLS for `-tunnelAddr` or `-httpsAddr`, normal renewal
+does not require a restart. `ngrokd` keeps the current certificate in memory and
 checks the certificate/key files when the loaded certificate is near expiration.
-New TLS handshakes use the renewed files after reload succeeds. Existing
+After a successful reload, new TLS handshakes use the renewed files. Existing
 connections continue.
 
-If Nginx terminates browser HTTPS, reload Nginx after certificate installation.
-`ngrokd` hot reload still applies to the client control listener when that
-listener uses the same certificate files.
+If Nginx terminates browser HTTPS, reload Nginx after installing the renewed
+files. `ngrokd` certificate reload still applies to the client control listener.
 
-## Nginx Coexistence
+## Using Nginx
 
-Use Nginx when the server already hosts other sites on ports 80 and 443.
+If Nginx already owns ports 80 and 443 on the server, keep `ngrokd` off those
+ports. There are two common setups.
 
 ### Option A: Nginx Terminates HTTPS
 
-This is simple and works well when browser HTTPS traffic can be terminated by
-Nginx and proxied to ngrokd's HTTP listener.
+This is the usual setup. Nginx handles browser HTTPS and proxies requests to the
+HTTP listener exposed by `ngrokd`.
 
-Run ngrokd:
+`ngrokd`:
 
 ```bash
 ./bin/ngrokd \
@@ -359,15 +381,15 @@ server {
 }
 ```
 
-Use this model if you want Nginx to own all public web TLS and keep ngrokd away
-from port 443.
+Use this option when you want Nginx to manage all public web TLS and keep
+`ngrokd` away from port 443.
 
 ### Option B: HTTPS Passthrough To ngrokd
 
-Use this when ngrokd must terminate HTTPS tunnel traffic itself and choose
-certificates by SNI.
+Use this when `ngrokd` should terminate HTTPS tunnel traffic itself and choose
+certificates by SNI. Nginx only passes the TCP connection through.
 
-Run ngrokd:
+`ngrokd`:
 
 ```bash
 ./bin/ngrokd \
@@ -394,8 +416,8 @@ server {
 }
 ```
 
-The `default` backend should point to your normal HTTPS stack. This prevents
-ngrok tunnel domains from taking over unrelated sites.
+The `default` backend should point to your normal HTTPS service, so tunnel
+domains do not interfere with unrelated sites.
 
 Templates:
 
@@ -430,7 +452,7 @@ sudo editor /etc/ngrok/client.yml
 sudo systemctl enable --now ngrok-client@client
 ```
 
-macOS examples:
+macOS templates:
 
 ```text
 deploy/launchd/com.example.ngrokd.plist
@@ -439,7 +461,7 @@ deploy/launchd/com.example.ngrok-client.plist
 
 ## Example Deployment
 
-Goal:
+Assume this target setup:
 
 ```text
 Primary domain: example.com
@@ -498,11 +520,11 @@ tunnels:
     hostname: admin.example.org
 ```
 
-Results:
+The expected hosts are:
 
 ```text
 http://app.example.com
-https://app.example.com      # if Nginx terminates HTTPS for wildcard hosts
+https://app.example.com
 http://api.example.net
 https://api.example.net
 http://admin.example.org
@@ -513,11 +535,12 @@ https://admin.example.org
 
 - Use a long random `auth_token`.
 - Keep client config files readable only by the user running the client.
-- Keep server env files readable only by root and the service user.
-- Keep the inspection UI on `127.0.0.1`, or set `inspect_auth`.
+- Keep server environment files readable only by root and the service user.
+- Keep the inspection UI on `127.0.0.1`; if it must be exposed elsewhere, set
+  `inspect_auth`.
 - Do not enable `-allowRemotePorts` for untrusted clients.
-- Put normal firewall and rate-limit controls in front of public services.
-- Rotate DNS API credentials if they were ever pasted into chat, logs, or issue
+- Put normal firewall and rate-limit controls in front of public entry points.
+- Rotate DNS API credentials if they ever appear in chat, logs, or issue
   trackers.
 
 ## License
