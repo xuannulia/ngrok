@@ -71,23 +71,13 @@ const pageHTML = `{{define "layout"}}
 {{end}}
 
 {{define "dashboard"}}
-<section class="grid flow-grid">
-  <div class="panel">
-    <h1>{{tr .Lang "guide_title"}}</h1>
-    <div class="guide-block">
+<section class="panel">
+  <h1>{{tr .Lang "guide_title"}}</h1>
+  <div class="setup-main">
+    <div>
       <h2>{{tr .Lang "guide_dns_title"}}</h2>
       <pre class="snippet">{{.Config.ControlHost}} A/AAAA &lt;server-ip&gt;
 *.{{.Config.Domain}} A/AAAA &lt;server-ip&gt;</pre>
-    </div>
-    <div class="guide-block">
-      <h2>{{tr .Lang "guide_order_title"}}</h2>
-      <ol class="guide-list">
-        <li>{{tr .Lang "guide_step_cert"}}</li>
-        <li>{{tr .Lang "guide_step_nginx"}}</li>
-        <li>{{tr .Lang "guide_step_build"}}</li>
-        <li>{{tr .Lang "guide_step_service"}}</li>
-        <li>{{tr .Lang "guide_step_client"}}</li>
-      </ol>
     </div>
     <div class="next">
       <div>
@@ -96,37 +86,17 @@ const pageHTML = `{{define "layout"}}
       </div>
       <a class="link-button" href="{{.NextStep.URL}}">{{tr .Lang "open"}}</a>
     </div>
-    <div class="steps">
-      {{range .Steps}}
-      <div class="step {{.State}}">
-        <div>
-          <strong>{{tr $.Lang .Title}}</strong>
-          <span>{{.Detail}}</span>
-        </div>
-        <span class="badge">{{state $.Lang .State}}</span>
-        <a href="{{.URL}}">{{tr $.Lang "open"}}</a>
-      </div>
-      {{end}}
-    </div>
   </div>
-  <div class="panel">
-    <h2>{{tr .Lang "status"}}</h2>
-    <table>
-      <tr><th>{{tr .Lang "env"}}</th><td>{{.EnvPath}}</td></tr>
-      <tr><th>{{tr .Lang "domain"}}</th><td>{{.Config.Domain}}</td></tr>
-      <tr><th>{{tr .Lang "control"}}</th><td>{{.Config.ControlHost}}:{{port .Config.TunnelAddr}}</td></tr>
-      <tr><th>{{tr .Lang "service"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
-      <tr><th>{{tr .Lang "certificate"}}</th><td>{{if .Cert.Error}}{{.Cert.Error}}{{else}}{{.Cert.NotAfter}}{{end}}</td></tr>
-    </table>
-  </div>
-  <div class="panel">
-    <h2>{{tr .Lang "checks"}}</h2>
-    <table>
-      {{range .Checks}}
-      <tr><th>{{tr $.Lang .Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Detail}}</td></tr>
-      {{end}}
-    </table>
-  </div>
+  <table class="steps-table">
+    {{range .Steps}}
+    <tr>
+      <th>{{tr $.Lang .Title}}</th>
+      <td>{{.Detail}}</td>
+      <td><span class="badge">{{state $.Lang .State}}</span></td>
+      <td><a href="{{.URL}}">{{tr $.Lang "open"}}</a></td>
+    </tr>
+    {{end}}
+  </table>
 </section>
 {{end}}
 
@@ -154,63 +124,44 @@ const pageHTML = `{{define "layout"}}
 {{end}}
 
 {{define "certificate"}}
-<section class="grid">
-  <div class="panel">
-    <h1>{{tr .Lang "Certificate"}}</h1>
-    <table>
-      <tr><th>{{tr .Lang "path"}}</th><td>{{.Cert.Path}}</td></tr>
-      <tr><th>{{tr .Lang "subject"}}</th><td>{{.Cert.Subject}}</td></tr>
-      <tr><th>{{tr .Lang "issuer"}}</th><td>{{.Cert.Issuer}}</td></tr>
-      <tr><th>{{tr .Lang "expires"}}</th><td>{{.Cert.NotAfter}}</td></tr>
-      <tr><th>{{tr .Lang "domain"}}</th><td><span class="badge">{{state .Lang .Cert.DomainOK}}</span></td></tr>
-      <tr><th>{{tr .Lang "wildcard"}}</th><td><span class="badge">{{state .Lang .Cert.WildcardOK}}</span></td></tr>
-      <tr><th>{{tr .Lang "names"}}</th><td>{{.Cert.DNSNames}}</td></tr>
-      <tr><th>{{tr .Lang "output_dir"}}</th><td>{{.CertDir}}</td></tr>
-    </table>
-  </div>
-  <div class="panel">
-    <h2>{{tr .Lang "dns_check"}}</h2>
-    <table>
-      {{range .DNSChecks}}
-      <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Detail}}</td></tr>
-      {{end}}
-    </table>
-  </div>
-  <div class="panel">
-    <h2>ACME</h2>
-    <form method="post" action="/certificate/issue">
-      <label>{{tr .Lang "domains"}}<textarea name="domains" rows="6" spellcheck="false">{{.Domains}}</textarea></label>
-      <label>{{tr .Lang "dns_plugin"}}<input name="dns_plugin" placeholder="dns_cf" required></label>
-      <label>{{tr .Lang "email"}}<input name="account_email" type="email"></label>
-      <label>{{tr .Lang "env_vars"}}<textarea name="env_vars" rows="7" spellcheck="false" placeholder="CF_Token=..."></textarea></label>
+<section class="panel">
+  <h1>{{tr .Lang "Certificate"}}</h1>
+  <form method="post" action="/certificate/issue" class="form-grid">
+    <label class="wide">{{tr .Lang "domains"}}<textarea name="domains" rows="5" spellcheck="false">{{.Domains}}</textarea></label>
+    <label>{{tr .Lang "dns_plugin"}}<input name="dns_plugin" placeholder="dns_cf" required></label>
+    <label>{{tr .Lang "email"}}<input name="account_email" type="email"></label>
+    <label class="wide">{{tr .Lang "env_vars"}}<textarea name="env_vars" rows="6" spellcheck="false" placeholder="CF_Token=..."></textarea></label>
+    <div class="actions wide">
       <button type="submit">{{tr .Lang "issue"}}</button>
-    </form>
-  </div>
+    </div>
+  </form>
+  <table class="compact-table">
+    <tr><th>{{tr .Lang "output_dir"}}</th><td colspan="3">{{.CertDir}}</td></tr>
+    <tr><th>{{tr .Lang "expires"}}</th><td>{{.Cert.NotAfter}}</td><th>{{tr .Lang "names"}}</th><td>{{.Cert.DNSNames}}</td></tr>
+    {{range .DNSChecks}}
+    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td colspan="2">{{.Detail}}</td></tr>
+    {{end}}
+  </table>
 </section>
 {{end}}
 
 {{define "build"}}
-<section class="grid">
-  <div class="panel">
-    <h1>{{tr .Lang "Build"}}</h1>
-    <table>
-      <tr><th>{{tr .Lang "work_dir"}}</th><td>{{.WorkDir}}</td></tr>
-      {{range .Binaries}}
-      <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Size}}</td><td><a href="{{.URL}}">{{tr $.Lang "download"}}</a></td></tr>
-      {{end}}
-      <tr><th>client.yml</th><td><span class="badge">{{state .Lang "ok"}}</span></td><td></td><td><a href="/download/client.yml">{{tr .Lang "download"}}</a></td></tr>
-    </table>
-    <form method="post" action="/build" class="actions build-actions">
-      <button name="target" value="server" type="submit">{{tr .Lang "build_server"}}</button>
-      <button name="target" value="client" type="submit">{{tr .Lang "build_client"}}</button>
-      <button name="target" value="admin" type="submit">{{tr .Lang "build_admin"}}</button>
-      <button name="target" value="all" type="submit">{{tr .Lang "build_all"}}</button>
-    </form>
-  </div>
-  <div class="panel">
-    <h2>{{tr .Lang "output"}}</h2>
-    <pre class="logs">{{.BuildOutput}}</pre>
-  </div>
+<section class="panel">
+  <h1>{{tr .Lang "Build"}}</h1>
+  <table>
+    <tr><th>{{tr .Lang "work_dir"}}</th><td colspan="3">{{.WorkDir}}</td></tr>
+    {{range .Binaries}}
+    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Size}}</td><td><a href="{{.URL}}">{{tr $.Lang "download"}}</a></td></tr>
+    {{end}}
+    <tr><th>client.yml</th><td><span class="badge">{{state .Lang "ok"}}</span></td><td></td><td><a href="/download/client.yml">{{tr .Lang "download"}}</a></td></tr>
+  </table>
+  <form method="post" action="/build" class="actions build-actions">
+    <button name="target" value="server" type="submit">{{tr .Lang "build_server"}}</button>
+    <button name="target" value="client" type="submit">{{tr .Lang "build_client"}}</button>
+    <button name="target" value="admin" type="submit">{{tr .Lang "build_admin"}}</button>
+    <button name="target" value="all" type="submit">{{tr .Lang "build_all"}}</button>
+  </form>
+  {{if .BuildOutput}}<pre class="logs">{{.BuildOutput}}</pre>{{end}}
 </section>
 {{end}}
 
@@ -230,24 +181,19 @@ const pageHTML = `{{define "layout"}}
 {{end}}
 
 {{define "service"}}
-<section class="grid">
-  <div class="panel">
-    <h1>{{tr .Lang "Service"}}</h1>
-    <table>
-      <tr><th>{{tr .Lang "name"}}</th><td>ngrokd</td></tr>
-      <tr><th>{{tr .Lang "state"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
-      <tr><th>{{tr .Lang "error"}}</th><td>{{.Service.Error}}</td></tr>
-    </table>
-    <form method="post" action="/service" class="actions">
-      <button name="action" value="start" type="submit">{{tr .Lang "start"}}</button>
-      <button name="action" value="restart" type="submit">{{tr .Lang "restart"}}</button>
-      <button name="action" value="stop" type="submit">{{tr .Lang "stop"}}</button>
-    </form>
-  </div>
-  <div class="panel">
-    <h2>{{tr .Lang "logs"}}</h2>
-    <pre class="logs">{{.Service.Logs}}</pre>
-  </div>
+<section class="panel">
+  <h1>{{tr .Lang "Service"}}</h1>
+  <table>
+    <tr><th>{{tr .Lang "name"}}</th><td>ngrokd</td></tr>
+    <tr><th>{{tr .Lang "state"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
+    <tr><th>{{tr .Lang "error"}}</th><td>{{.Service.Error}}</td></tr>
+  </table>
+  <form method="post" action="/service" class="actions build-actions">
+    <button name="action" value="start" type="submit">{{tr .Lang "start"}}</button>
+    <button name="action" value="restart" type="submit">{{tr .Lang "restart"}}</button>
+    <button name="action" value="stop" type="submit">{{tr .Lang "stop"}}</button>
+  </form>
+  <pre class="logs">{{.Service.Logs}}</pre>
 </section>
 {{end}}
 
@@ -333,27 +279,18 @@ h2 { font-size: 18px; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
 }
-.flow-grid {
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
-}
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 22px;
 }
-.guide-block {
+.setup-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: 16px;
+  align-items: stretch;
   margin-bottom: 18px;
-}
-.guide-block h2 {
-  margin-bottom: 10px;
-}
-.guide-list {
-  margin: 0;
-  padding-left: 22px;
-}
-.guide-list li {
-  margin: 7px 0;
 }
 .snippet {
   margin: 0;
@@ -487,6 +424,11 @@ table {
   width: 100%;
   border-collapse: collapse;
 }
+.steps-table td:last-child,
+.compact-table td:last-child {
+  width: 90px;
+  text-align: right;
+}
 th, td {
   padding: 9px 0;
   border-bottom: 1px solid var(--line);
@@ -533,6 +475,7 @@ th {
 @media (max-width: 800px) {
   .top { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
   .grid, .form-grid { grid-template-columns: 1fr; }
+  .setup-main { grid-template-columns: 1fr; }
   .language { margin-left: 0; }
   .step { grid-template-columns: 1fr; }
   main { width: min(100vw - 20px, 1180px); margin-top: 16px; }
