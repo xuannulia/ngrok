@@ -103,15 +103,9 @@ const pageHTML = `{{define "layout"}}
   <form method="post" action="/config" class="form-grid">
     <label>{{tr .Lang "domain"}}<input name="domain" value="{{.Config.Domain}}" required></label>
     <label>{{tr .Lang "control_host"}}<input name="control_host" value="{{.Config.ControlHost}}" required></label>
-    <label>{{tr .Lang "tls_cert"}}<input name="tls_crt" value="{{.Config.TLSCrt}}" required></label>
-    <label>{{tr .Lang "tls_key"}}<input name="tls_key" value="{{.Config.TLSKey}}" required></label>
-    <label>{{tr .Lang "auth_token"}}<input name="auth_token" value="{{.Config.AuthToken}}"></label>
     <label>{{tr .Lang "http_addr"}}<input name="http_addr" value="{{.Config.HTTPAddr}}"></label>
-    <label>{{tr .Lang "https_addr"}}<input name="https_addr" value="{{.Config.HTTPSAddr}}"></label>
     <label>{{tr .Lang "tunnel_addr"}}<input name="tunnel_addr" value="{{.Config.TunnelAddr}}"></label>
-    <label>{{tr .Lang "log_level"}}<input name="log_level" value="{{.Config.LogLevel}}"></label>
-    <label>{{tr .Lang "max_connections"}}<input name="max_connections" value="{{.Config.MaxConnections}}"></label>
-    <label class="wide">{{tr .Lang "extra_args"}}<input name="extra_args" value="{{.Config.ExtraArgs}}"></label>
+    <label class="wide">{{tr .Lang "auth_token"}}<input name="auth_token" value="{{.Config.AuthToken}}"></label>
     <label class="check"><input type="checkbox" name="new_token" value="1"> {{tr .Lang "new_token"}}</label>
     <div class="actions wide">
       <button type="submit">{{tr .Lang "save"}}</button>

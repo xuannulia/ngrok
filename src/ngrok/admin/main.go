@@ -405,20 +405,17 @@ func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		existing := readServerConfig(a.opts.envPath)
-		cfg := serverConfig{
-			Domain:         strings.TrimSpace(r.Form.Get("domain")),
-			ControlHost:    strings.TrimSpace(r.Form.Get("control_host")),
-			TLSCrt:         strings.TrimSpace(r.Form.Get("tls_crt")),
-			TLSKey:         strings.TrimSpace(r.Form.Get("tls_key")),
-			AuthToken:      strings.TrimSpace(r.Form.Get("auth_token")),
-			HTTPAddr:       strings.TrimSpace(r.Form.Get("http_addr")),
-			HTTPSAddr:      strings.TrimSpace(r.Form.Get("https_addr")),
-			TunnelAddr:     strings.TrimSpace(r.Form.Get("tunnel_addr")),
-			LogLevel:       strings.TrimSpace(r.Form.Get("log_level")),
-			MaxConnections: strings.TrimSpace(r.Form.Get("max_connections")),
-			ExtraArgs:      strings.TrimSpace(r.Form.Get("extra_args")),
-			VHost:          existing.VHost,
+		cfg := existing
+		cfg.Domain = strings.TrimSpace(r.Form.Get("domain"))
+		cfg.ControlHost = strings.TrimSpace(r.Form.Get("control_host"))
+		cfg.AuthToken = strings.TrimSpace(r.Form.Get("auth_token"))
+		cfg.HTTPAddr = strings.TrimSpace(r.Form.Get("http_addr"))
+		cfg.TunnelAddr = strings.TrimSpace(r.Form.Get("tunnel_addr"))
+		allDomains := configuredDomainList(a.opts.envPath, existing)
+		if defaultLikeDomain(existing.Domain) {
+			allDomains = nil
 		}
+		cfg.VHost = strings.Join(appendDomain(allDomains, cfg.Domain), ",")
 		if r.Form.Get("new_token") == "1" || cfg.AuthToken == "" {
 			token, err := randomToken()
 			if err != nil {
