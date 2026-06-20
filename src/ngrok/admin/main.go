@@ -328,7 +328,7 @@ func (a *app) baseData(r *http.Request, title, page string) viewData {
 		EnvPath:    a.opts.envPath,
 		Addr:       a.opts.addr,
 		ServerIP:   displayServerIP(r),
-		DNSRecords: dnsRecordText(cfg, displayServerIP(r)),
+		DNSRecords: dnsRecordText(a.opts.envPath, cfg, displayServerIP(r)),
 		Now:        time.Now().Format(time.RFC3339),
 	}
 }
@@ -437,16 +437,9 @@ func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		existing := readServerConfig(a.opts.envPath)
 		cfg := existing
-		cfg.Domain = strings.TrimSpace(r.Form.Get("domain"))
-		cfg.ControlHost = strings.TrimSpace(r.Form.Get("control_host"))
 		cfg.AuthToken = strings.TrimSpace(r.Form.Get("auth_token"))
 		cfg.HTTPAddr = strings.TrimSpace(r.Form.Get("http_addr"))
 		cfg.TunnelAddr = strings.TrimSpace(r.Form.Get("tunnel_addr"))
-		allDomains := configuredDomainList(a.opts.envPath, existing)
-		if defaultLikeDomain(existing.Domain) {
-			allDomains = nil
-		}
-		cfg.VHost = strings.Join(appendDomain(allDomains, cfg.Domain), ",")
 		if r.Form.Get("new_token") == "1" || cfg.AuthToken == "" {
 			token, err := randomToken()
 			if err != nil {
@@ -498,17 +491,24 @@ func (a *app) handleCertificateDomain(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, r, "Certificate", "certificate", errors.New("domain is invalid"))
 		return
 	}
+	controlHosts := parseDomainInput(r.Form.Get("control_host"))
+	if rawControlHost := strings.TrimSpace(r.Form.Get("control_host")); rawControlHost != "" && len(controlHosts) != 1 {
+		a.renderError(w, r, "Certificate", "certificate", errors.New("control host is invalid"))
+		return
+	}
 	cfg := readServerConfig(a.opts.envPath)
 	cfg.applyDefaults()
 	allDomains := configuredDomainList(a.opts.envPath, cfg)
 	if defaultLikeDomain(cfg.Domain) {
 		allDomains = nil
 		cfg.Domain = domains[0]
-		if defaultLikeControlHost(cfg.ControlHost) {
-			cfg.ControlHost = "ngrok." + domains[0]
-		}
 		cfg.TLSCrt = filepath.Join(domainCertDir(a.opts.certDir, domains[0]), "fullchain.pem")
 		cfg.TLSKey = filepath.Join(domainCertDir(a.opts.certDir, domains[0]), "privkey.pem")
+	}
+	if len(controlHosts) == 1 {
+		cfg.ControlHost = controlHosts[0]
+	} else if defaultLikeControlHost(cfg.ControlHost) {
+		cfg.ControlHost = "ngrok." + cfg.Domain
 	}
 	allDomains = appendDomain(allDomains, domains[0])
 	cfg.VHost = strings.Join(allDomains, ",")
@@ -1181,15 +1181,21 @@ func runChecks(cfg serverConfig, opts options, nginxPath string) []checkItem {
 func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts options, nginxPath string) []setupStep {
 	cfg.applyDefaults()
 	configState := "done"
-	configDetail := cfg.Domain + " / " + cfg.ControlHost
+	configDetail := cfg.HTTPAddr + " / " + cfg.TunnelAddr
 	if _, err := os.Stat(opts.envPath); err != nil || cfg.AuthToken == "" || cfg.AuthToken == "change-me-long-random-token" {
 		configState = "todo"
 		configDetail = opts.envPath
 	}
 
+	domainState := "done"
+	domainDetail := domainSummary(opts.envPath, cfg)
+	if defaultLikeDomain(cfg.Domain) {
+		domainState = "todo"
+	}
+
 	certState := "done"
 	certDetail := cert.NotAfter
-	if cert.Error != "" || cert.DomainOK != "ok" || cert.WildcardOK != "ok" {
+	if defaultLikeDomain(cfg.Domain) || cert.Error != "" || cert.DomainOK != "ok" || cert.WildcardOK != "ok" {
 		certState = "todo"
 		certDetail = cert.Path
 	}
@@ -1200,13 +1206,20 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 		nginxState = "todo"
 	}
 
-	buildState := "done"
 	server := serverBinaryItem(opts.workDir)
 	serverLive := serverLiveItem(opts.workDir, opts.serverBin)
 	clients := clientPlatformItems(opts.workDir)
-	buildDetail := buildSummary(server, serverLive, clients)
-	if server.State != "ok" || serverLive.State != "ok" || !hasBuiltClient(clients) {
-		buildState = "todo"
+
+	serverBuildState := "done"
+	serverBuildDetail := serverBuildSummary(server, serverLive)
+	if server.State != "ok" || serverLive.State != "ok" {
+		serverBuildState = "todo"
+	}
+
+	clientBuildState := "done"
+	clientBuildDetail := clientBuildSummary(clients)
+	if !hasBuiltClient(clients) {
+		clientBuildState = "todo"
 	}
 
 	serviceState := "done"
@@ -1223,11 +1236,13 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 
 	return []setupStep{
 		{Key: "step_config", Title: "deploy_step_basic", Help: "deploy_help_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
+		{Key: "step_domain", Title: "deploy_step_domain", Help: "deploy_help_domain", State: domainState, Detail: domainDetail, URL: "/certificate", Action: "open"},
 		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", State: dnsStepState(cfg), Detail: dnsStepDetail(cfg), URL: "/", Action: "refresh_dns"},
 		{Key: "step_certificate", Title: "deploy_step_cert", Help: "deploy_help_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
 		{Key: "step_nginx", Title: "deploy_step_nginx", Help: "deploy_help_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
-		{Key: "step_build", Title: "deploy_step_build", Help: "deploy_help_build", State: buildState, Detail: buildDetail, URL: "/build", Action: "open"},
+		{Key: "step_server_build", Title: "deploy_step_server_build", Help: "deploy_help_server_build", State: serverBuildState, Detail: serverBuildDetail, URL: "/build", Action: "open"},
 		{Key: "step_service", Title: "deploy_step_service", Help: "deploy_help_service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "open"},
+		{Key: "step_client_build", Title: "deploy_step_client_build", Help: "deploy_help_client_build", State: clientBuildState, Detail: clientBuildDetail, URL: "/build", Action: "open"},
 		{Key: "step_download", Title: "deploy_step_download", Help: "deploy_help_download", State: downloadState, Detail: downloadDetail, URL: "/build", Action: "open"},
 	}
 }
@@ -1279,7 +1294,7 @@ func configuredDomainList(envPath string, cfg serverConfig) []string {
 	var result []string
 	add := func(domain string) {
 		domain = normalizeDomain(domain)
-		if domain == "" || seen[domain] || !validDomainName(domain) {
+		if domain == "" || seen[domain] || defaultLikeDomain(domain) || !validDomainName(domain) {
 			return
 		}
 		seen[domain] = true
@@ -1293,9 +1308,6 @@ func configuredDomainList(envPath string, cfg serverConfig) []string {
 	}
 	for _, item := range strings.Split(vhost, ",") {
 		add(item)
-	}
-	if len(result) == 0 {
-		add("example.com")
 	}
 	return result
 }
@@ -1375,12 +1387,45 @@ func displayServerIP(r *http.Request) string {
 	return ip.String()
 }
 
-func dnsRecordText(cfg serverConfig, serverIP string) string {
+func dnsRecordText(envPath string, cfg serverConfig, serverIP string) string {
 	cfg.applyDefaults()
 	if serverIP == "" {
 		serverIP = "<server-ip>"
 	}
-	return fmt.Sprintf("%s A/AAAA %s\n*.%s A/AAAA %s", cfg.ControlHost, serverIP, cfg.Domain, serverIP)
+	if defaultLikeDomain(cfg.Domain) {
+		return "example.com A/AAAA " + serverIP + "\n*.example.com A/AAAA " + serverIP
+	}
+	seen := make(map[string]bool)
+	var records []string
+	add := func(host string) {
+		host = normalizeDNSRecordHost(host)
+		base := strings.TrimPrefix(host, "*.")
+		if host == "" || seen[host] || defaultLikeDomain(base) {
+			return
+		}
+		seen[host] = true
+		records = append(records, fmt.Sprintf("%s A/AAAA %s", host, serverIP))
+	}
+	add(cfg.ControlHost)
+	for _, domain := range configuredDomainList(envPath, cfg) {
+		add(domain)
+		add("*." + domain)
+	}
+	return strings.Join(records, "\n")
+}
+
+func normalizeDNSRecordHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	wildcard := strings.HasPrefix(host, "*.")
+	host = strings.TrimPrefix(host, "*.")
+	host = strings.TrimSuffix(stripPort(host), ".")
+	if host == "" {
+		return ""
+	}
+	if wildcard {
+		return "*." + host
+	}
+	return host
 }
 
 func domainCertRows(certDir string, domains []string, cfg serverConfig) []domainCertRow {
@@ -1402,6 +1447,9 @@ func domainCertRows(certDir string, domains []string, cfg serverConfig) []domain
 }
 
 func dnsStepState(cfg serverConfig) string {
+	if defaultLikeDomain(cfg.Domain) {
+		return "todo"
+	}
 	if firstFailedCheck(domainDNSChecks([]string{cfg.Domain})) != nil {
 		return "todo"
 	}
@@ -1412,9 +1460,19 @@ func dnsStepState(cfg serverConfig) string {
 }
 
 func dnsStepDetail(cfg serverConfig) string {
+	if defaultLikeDomain(cfg.Domain) {
+		return cfg.Domain
+	}
 	control := dnsCheck("control DNS", cfg.ControlHost)
 	wildcard := dnsCheck("wildcard DNS", "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+cfg.Domain)
 	return control.Detail + " / " + wildcard.Detail
+}
+
+func domainSummary(envPath string, cfg serverConfig) string {
+	if defaultLikeDomain(cfg.Domain) {
+		return cfg.Domain
+	}
+	return strings.Join(configuredDomainList(envPath, cfg), ", ") + " / " + cfg.ControlHost
 }
 
 func firstFailedCheck(checks []checkItem) *checkItem {
@@ -1559,23 +1617,27 @@ func hasBuiltClient(platforms []clientPlatform) bool {
 	return false
 }
 
-func buildSummary(server, serverLive binaryItem, clients []clientPlatform) string {
+func serverBuildSummary(server, serverLive binaryItem) string {
+	if server.State == "ok" && serverLive.State == "ok" {
+		return serverLive.Path
+	}
+	if server.State == "ok" {
+		return server.Path + " -> " + serverLive.Path
+	}
+	return server.Path
+}
+
+func clientBuildSummary(clients []clientPlatform) string {
 	var built []string
 	for _, client := range clients {
 		if client.State == "ok" {
 			built = append(built, client.Filename)
 		}
 	}
-	serverState := server.Path
-	if server.State == "ok" && serverLive.State == "ok" {
-		serverState = serverLive.Path
-	} else if server.State == "ok" {
-		serverState = server.Path + " -> " + serverLive.Path
-	}
 	if len(built) == 0 {
-		return serverState + " / ngrok-*"
+		return "ngrok-*"
 	}
-	return serverState + " / " + strings.Join(built, ", ")
+	return strings.Join(built, ", ")
 }
 
 func downloadSummary(clients []clientPlatform) string {

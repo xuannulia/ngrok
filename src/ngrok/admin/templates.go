@@ -93,8 +93,6 @@ const pageHTML = `{{define "layout"}}
 <section class="panel">
   <h1>{{tr .Lang "Config"}}</h1>
   <form method="post" action="/config" class="form-grid">
-    <label>{{tr .Lang "domain"}}<input name="domain" value="{{.Config.Domain}}" required></label>
-    <label>{{tr .Lang "control_host"}}<input name="control_host" value="{{.Config.ControlHost}}" required></label>
     <label>{{tr .Lang "http_addr"}}<input name="http_addr" value="{{.Config.HTTPAddr}}"></label>
     <label>{{tr .Lang "tunnel_addr"}}<input name="tunnel_addr" value="{{.Config.TunnelAddr}}"></label>
     <label class="wide">{{tr .Lang "auth_token"}}<input name="auth_token" value="{{.Config.AuthToken}}"></label>
@@ -112,6 +110,7 @@ const pageHTML = `{{define "layout"}}
   <div class="toolbar">
     <form method="post" action="/certificate/domain" class="inline-form">
       <input name="domain" placeholder="example.com" required>
+      <input name="control_host" placeholder="ngrok.example.com">
       <button type="submit">{{tr .Lang "add_domain"}}</button>
     </form>
     <form method="get" action="/certificate" class="inline-form">
