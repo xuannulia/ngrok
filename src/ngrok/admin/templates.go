@@ -17,10 +17,8 @@ const pageHTML = `{{define "layout"}}
       <a href="/">{{tr .Lang "nav_dashboard"}}</a>
       <a href="/config">{{tr .Lang "nav_config"}}</a>
       <a href="/certificate">{{tr .Lang "nav_certificate"}}</a>
-      <a href="/nginx">{{tr .Lang "nav_nginx"}}</a>
       <a href="/build">{{tr .Lang "nav_build"}}</a>
       <a href="/service">{{tr .Lang "nav_service"}}</a>
-      <a href="/client">{{tr .Lang "nav_client"}}</a>
       <a href="/logout">{{tr .Lang "nav_logout"}}</a>
     </nav>
     {{end}}
@@ -41,7 +39,6 @@ const pageHTML = `{{define "layout"}}
     {{if eq .Page "nginx"}}{{template "nginx" .}}{{end}}
     {{if eq .Page "build"}}{{template "build" .}}{{end}}
     {{if eq .Page "service"}}{{template "service" .}}{{end}}
-    {{if eq .Page "client"}}{{template "client" .}}{{end}}
   </main>
 </body>
 </html>
@@ -126,21 +123,41 @@ const pageHTML = `{{define "layout"}}
 {{define "certificate"}}
 <section class="panel">
   <h1>{{tr .Lang "Certificate"}}</h1>
-  <form method="post" action="/certificate/issue" class="form-grid">
-    <label class="wide">{{tr .Lang "domains"}}<textarea name="domains" rows="5" spellcheck="false">{{.Domains}}</textarea></label>
-    <label>{{tr .Lang "dns_plugin"}}<input name="dns_plugin" placeholder="dns_cf" required></label>
-    <label>{{tr .Lang "email"}}<input name="account_email" type="email"></label>
-    <label class="wide">{{tr .Lang "env_vars"}}<textarea name="env_vars" rows="6" spellcheck="false" placeholder="CF_Token=..."></textarea></label>
-    <div class="actions wide">
-      <button type="submit">{{tr .Lang "issue"}}</button>
-    </div>
-  </form>
-  <table class="compact-table">
-    <tr><th>{{tr .Lang "output_dir"}}</th><td colspan="3">{{.CertDir}}</td></tr>
-    <tr><th>{{tr .Lang "expires"}}</th><td>{{.Cert.NotAfter}}</td><th>{{tr .Lang "names"}}</th><td>{{.Cert.DNSNames}}</td></tr>
-    {{range .DNSChecks}}
-    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td colspan="2">{{.Detail}}</td></tr>
+  <div class="toolbar">
+    <form method="post" action="/certificate/domain" class="inline-form">
+      <input name="domain" placeholder="example.com" required>
+      <button type="submit">{{tr .Lang "add_domain"}}</button>
+    </form>
+    <form method="get" action="/certificate" class="inline-form">
+      <button type="submit">{{tr .Lang "refresh_dns"}}</button>
+    </form>
+  </div>
+  <table class="domain-table">
+    <tr>
+      <th>{{tr .Lang "domain_item"}}</th>
+      <th>{{tr .Lang "dns_status"}}</th>
+      <th>{{tr .Lang "cert_status"}}</th>
+      <th>{{tr .Lang "action"}}</th>
+    </tr>
+    {{range .CertRows}}
+    <tr>
+      <td><strong>{{.Domain}}</strong></td>
+      <td>
+        <span class="badge">{{state $.Lang .RootDNS.State}}</span> {{tr $.Lang "root_domain"}}: {{.RootDNS.Detail}}<br>
+        <span class="badge">{{state $.Lang .WildcardDNS.State}}</span> {{tr $.Lang "wildcard_domain"}}: {{.WildcardDNS.Detail}}
+      </td>
+      <td><span class="badge">{{state $.Lang .CertState}}</span> {{.CertDetail}}</td>
+      <td>
+        <form method="post" action="/certificate/issue" class="table-form">
+          <input type="hidden" name="domain" value="{{.Domain}}">
+          <button type="submit">{{tr $.Lang "issue"}}</button>
+        </form>
+      </td>
+    </tr>
     {{end}}
+  </table>
+  <table class="compact-table meta-table">
+    <tr><th>{{tr .Lang "output_dir"}}</th><td>{{.CertDir}}</td></tr>
   </table>
 </section>
 {{end}}
@@ -151,15 +168,13 @@ const pageHTML = `{{define "layout"}}
   <table>
     <tr><th>{{tr .Lang "work_dir"}}</th><td colspan="3">{{.WorkDir}}</td></tr>
     {{range .Binaries}}
-    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Size}}</td><td><a href="{{.URL}}">{{tr $.Lang "download"}}</a></td></tr>
+    <tr><th>{{.Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Size}}</td><td>{{if .URL}}<a href="{{.URL}}">{{tr $.Lang "download"}}</a>{{end}}</td></tr>
     {{end}}
     <tr><th>client.yml</th><td><span class="badge">{{state .Lang "ok"}}</span></td><td></td><td><a href="/download/client.yml">{{tr .Lang "download"}}</a></td></tr>
   </table>
   <form method="post" action="/build" class="actions build-actions">
     <button name="target" value="server" type="submit">{{tr .Lang "build_server"}}</button>
     <button name="target" value="client" type="submit">{{tr .Lang "build_client"}}</button>
-    <button name="target" value="admin" type="submit">{{tr .Lang "build_admin"}}</button>
-    <button name="target" value="all" type="submit">{{tr .Lang "build_all"}}</button>
   </form>
   {{if .BuildOutput}}<pre class="logs">{{.BuildOutput}}</pre>{{end}}
 </section>
@@ -197,16 +212,6 @@ const pageHTML = `{{define "layout"}}
 </section>
 {{end}}
 
-{{define "client"}}
-<section class="panel">
-  <h1>{{tr .Lang "Client"}}</h1>
-  <form method="post" action="/client">
-    <label>{{tr .Lang "path"}}<input value="{{.ClientPath}}" readonly></label>
-    <label>{{tr .Lang "config"}}<textarea rows="16" spellcheck="false" readonly>{{.ClientConfig}}</textarea></label>
-    <button type="submit">{{tr .Lang "write"}}</button>
-  </form>
-</section>
-{{end}}
 `
 
 const styleCSS = `
@@ -367,6 +372,38 @@ button:hover { filter: brightness(0.95); }
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.inline-form input {
+  width: min(320px, 72vw);
+}
+.table-form {
+  display: block;
+}
+.domain-table td:nth-child(2),
+.domain-table td:nth-child(3) {
+  overflow-wrap: anywhere;
+}
+.domain-table th:last-child,
+.domain-table td:last-child {
+  width: 110px;
+  text-align: right;
+}
+.meta-table {
+  margin-top: 18px;
 }
 .build-actions {
   margin-top: 16px;
