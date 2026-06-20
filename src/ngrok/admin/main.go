@@ -102,9 +102,19 @@ type checkItem struct {
 	Detail string
 }
 
+type setupStep struct {
+	Key    string
+	Title  string
+	State  string
+	Detail string
+	URL    string
+	Action string
+}
+
 type viewData struct {
 	Title        string
 	Page         string
+	Lang         string
 	Authed       bool
 	Message      string
 	Error        string
@@ -112,6 +122,8 @@ type viewData struct {
 	Cert         certStatus
 	Service      serviceStatus
 	Checks       []checkItem
+	Steps        []setupStep
+	NextStep     setupStep
 	ClientConfig string
 	NginxConfig  string
 	NginxPath    string
@@ -187,7 +199,23 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/service", a.handleService)
 	mux.HandleFunc("/client", a.handleClient)
 	mux.HandleFunc("/static/style.css", handleStyle)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if lang := normalizeLang(r.URL.Query().Get("lang")); lang != "" {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "ngrok_admin_lang",
+				Value:    lang,
+				Path:     "/",
+				SameSite: http.SameSiteLaxMode,
+				Expires:  time.Now().Add(365 * 24 * time.Hour),
+			})
+			q := r.URL.Query()
+			q.Del("lang")
+			r.URL.RawQuery = q.Encode()
+			http.Redirect(w, r, r.URL.String(), http.StatusFound)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (a *app) hasAdmin() bool {
@@ -198,14 +226,17 @@ func (a *app) hasAdmin() bool {
 
 func (a *app) baseData(r *http.Request, title, page string) viewData {
 	cfg := readServerConfig(a.opts.envPath)
+	lang := requestLang(r)
+	nginxPath := detectNginxPath(cfg, a.opts.nginxPath)
 	return viewData{
-		Title:      title,
+		Title:      tr(lang, title),
 		Page:       page,
+		Lang:       lang,
 		Authed:     a.currentUser(r) != "",
-		Message:    r.URL.Query().Get("msg"),
+		Message:    messageText(lang, r.URL.Query().Get("msg")),
 		Error:      r.URL.Query().Get("err"),
 		Config:     cfg,
-		NginxPath:  a.opts.nginxPath,
+		NginxPath:  nginxPath,
 		ClientPath: a.opts.clientPath,
 		EnvPath:    a.opts.envPath,
 		Addr:       a.opts.addr,
@@ -228,7 +259,9 @@ func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 	data := a.baseData(r, "Dashboard", "dashboard")
 	data.Cert = readCertStatus(data.Config)
 	data.Service = readServiceStatus(a.opts.serviceName)
-	data.Checks = runChecks(data.Config, a.opts)
+	data.Checks = runChecks(data.Config, a.opts, data.NginxPath)
+	data.Steps = setupSteps(data.Config, data.Cert, data.Service, a.opts, data.NginxPath)
+	data.NextStep = nextStep(data.Steps)
 	render(w, data)
 }
 
@@ -270,7 +303,7 @@ func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
 		a.setupKey = ""
 		a.mu.Unlock()
 		a.setSession(w, username)
-		http.Redirect(w, r, "/config?msg=admin%20ready", http.StatusFound)
+		http.Redirect(w, r, "/?msg=admin_ready", http.StatusFound)
 		return
 	}
 	render(w, a.baseData(r, "Setup", "setup"))
@@ -343,7 +376,7 @@ func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
 			a.renderErrorWithConfig(w, r, "Config", "config", err, cfg)
 			return
 		}
-		http.Redirect(w, r, "/config?msg=config%20saved", http.StatusFound)
+		http.Redirect(w, r, "/?msg=config_saved", http.StatusFound)
 		return
 	}
 	render(w, a.baseData(r, "Config", "config"))
@@ -480,7 +513,7 @@ func (a *app) handleClient(w http.ResponseWriter, r *http.Request) {
 			render(w, data)
 			return
 		}
-		http.Redirect(w, r, "/client?msg=client%20config%20written", http.StatusFound)
+		http.Redirect(w, r, "/?msg=client_saved", http.StatusFound)
 		return
 	}
 	data := a.baseData(r, "Client", "client")
@@ -889,7 +922,7 @@ func readServiceStatus(service string) serviceStatus {
 	return status
 }
 
-func runChecks(cfg serverConfig, opts options) []checkItem {
+func runChecks(cfg serverConfig, opts options, nginxPath string) []checkItem {
 	cfg.applyDefaults()
 	var checks []checkItem
 	checks = append(checks, pathCheck("env", opts.envPath))
@@ -898,8 +931,64 @@ func runChecks(cfg serverConfig, opts options) []checkItem {
 	checks = append(checks, dnsCheck("control DNS", cfg.ControlHost))
 	checks = append(checks, dnsCheck("wildcard DNS", "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+cfg.Domain))
 	checks = append(checks, tcpCheck("tunnel port", cfg.ControlHost, tunnelPort(cfg.TunnelAddr)))
-	checks = append(checks, pathCheck("nginx config", opts.nginxPath))
+	checks = append(checks, pathCheck("nginx config", nginxPath))
 	return checks
+}
+
+func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts options, nginxPath string) []setupStep {
+	cfg.applyDefaults()
+	configState := "done"
+	configDetail := cfg.Domain + " / " + cfg.ControlHost
+	if _, err := os.Stat(opts.envPath); err != nil || cfg.AuthToken == "" || cfg.AuthToken == "change-me-long-random-token" {
+		configState = "todo"
+		configDetail = opts.envPath
+	}
+
+	certState := "done"
+	certDetail := cert.NotAfter
+	if cert.Error != "" || cert.DomainOK != "ok" || cert.WildcardOK != "ok" {
+		certState = "todo"
+		if cert.Error != "" {
+			certDetail = cert.Error
+		} else {
+			certDetail = cert.Path
+		}
+	}
+
+	nginxState := "done"
+	nginxDetail := nginxPath
+	if _, err := os.Stat(nginxPath); err != nil {
+		nginxState = "todo"
+	}
+
+	serviceState := "done"
+	serviceDetail := service.State
+	if service.State != "active" {
+		serviceState = "todo"
+	}
+
+	clientState := "done"
+	clientDetail := opts.clientPath
+	if _, err := os.Stat(opts.clientPath); err != nil {
+		clientState = "todo"
+	}
+
+	return []setupStep{
+		{Key: "step_config", Title: "Config", State: configState, Detail: configDetail, URL: "/config", Action: "Open"},
+		{Key: "step_certificate", Title: "Certificate", State: certState, Detail: certDetail, URL: "/certificate", Action: "Open"},
+		{Key: "step_nginx", Title: "Nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "Open"},
+		{Key: "step_service", Title: "Service", State: serviceState, Detail: serviceDetail, URL: "/service", Action: "Open"},
+		{Key: "step_client", Title: "Client", State: clientState, Detail: clientDetail, URL: "/client", Action: "Open"},
+	}
+}
+
+func nextStep(steps []setupStep) setupStep {
+	for _, step := range steps {
+		if step.State != "done" {
+			return step
+		}
+	}
+	return setupStep{Key: "ready", Title: "Ready", State: "done", Detail: "", URL: "/client", Action: "Open"}
 }
 
 func pathCheck(name, path string) checkItem {
@@ -907,6 +996,31 @@ func pathCheck(name, path string) checkItem {
 		return checkItem{Name: name, State: "missing", Detail: path}
 	}
 	return checkItem{Name: name, State: "ok", Detail: path}
+}
+
+func detectNginxPath(cfg serverConfig, fallback string) string {
+	cfg.applyDefaults()
+	if _, err := os.Stat(fallback); err == nil {
+		return fallback
+	}
+	patterns := []string{
+		"/etc/nginx/conf.d/*.conf",
+		"/etc/nginx/sites-enabled/*",
+	}
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		for _, path := range matches {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			text := string(b)
+			if strings.Contains(text, cfg.HTTPAddr) || (strings.Contains(strings.ToLower(text), "ngrok") && strings.Contains(text, "proxy_pass")) {
+				return path
+			}
+		}
+	}
+	return fallback
 }
 
 func dnsCheck(name, host string) checkItem {
@@ -1090,6 +1204,72 @@ func boolState(ok bool) string {
 	return "fail"
 }
 
+func normalizeLang(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	switch lang {
+	case "zh", "zh-cn", "cn":
+		return "zh-CN"
+	case "en", "en-us", "en-gb":
+		return "en"
+	default:
+		return ""
+	}
+}
+
+func requestLang(r *http.Request) string {
+	if cookie, err := r.Cookie("ngrok_admin_lang"); err == nil {
+		if lang := normalizeLang(cookie.Value); lang != "" {
+			return lang
+		}
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Accept-Language")), "zh") {
+		return "zh-CN"
+	}
+	return "en"
+}
+
+func tr(lang, key string) string {
+	if lang == "" {
+		lang = "en"
+	}
+	if m, ok := translations[lang]; ok {
+		if v, ok := m[key]; ok {
+			return v
+		}
+	}
+	if v, ok := translations["en"][key]; ok {
+		return v
+	}
+	return key
+}
+
+func stateText(lang, state string) string {
+	switch state {
+	case "done", "ok", "active":
+		return tr(lang, "state_ok")
+	case "todo", "missing", "fail", "failed", "inactive", "unavailable":
+		return tr(lang, "state_todo")
+	case "running":
+		return tr(lang, "state_running")
+	default:
+		if state == "" {
+			return tr(lang, "state_unknown")
+		}
+		return state
+	}
+}
+
+func messageText(lang, code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ""
+	}
+	if strings.ContainsAny(code, " \t\n") {
+		return code
+	}
+	return tr(lang, "msg_"+code)
+}
+
 func first(value, fallback string) string {
 	if value != "" {
 		return value
@@ -1105,5 +1285,7 @@ func tail(s string, max int) string {
 }
 
 var pageTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
-	"port": tunnelPort,
+	"port":  tunnelPort,
+	"tr":    tr,
+	"state": stateText,
 }).Parse(pageHTML))

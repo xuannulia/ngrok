@@ -2,7 +2,7 @@ package admin
 
 const pageHTML = `{{define "layout"}}
 <!doctype html>
-<html lang="en">
+<html lang="{{if eq .Lang "zh-CN"}}zh-CN{{else}}en{{end}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -14,15 +14,20 @@ const pageHTML = `{{define "layout"}}
     <a class="brand" href="/">ngrok admin</a>
     {{if .Authed}}
     <nav>
-      <a href="/">Dashboard</a>
-      <a href="/config">Config</a>
-      <a href="/certificate">Certificate</a>
-      <a href="/nginx">Nginx</a>
-      <a href="/service">Service</a>
-      <a href="/client">Client</a>
-      <a href="/logout">Logout</a>
+      <a href="/">{{tr .Lang "nav_dashboard"}}</a>
+      <a href="/config">{{tr .Lang "nav_config"}}</a>
+      <a href="/certificate">{{tr .Lang "nav_certificate"}}</a>
+      <a href="/nginx">{{tr .Lang "nav_nginx"}}</a>
+      <a href="/service">{{tr .Lang "nav_service"}}</a>
+      <a href="/client">{{tr .Lang "nav_client"}}</a>
+      <a href="/logout">{{tr .Lang "nav_logout"}}</a>
     </nav>
     {{end}}
+    <div class="language">
+      <a href="?lang=zh-CN">中文</a>
+      <span>/</span>
+      <a href="?lang=en">English</a>
+    </div>
   </header>
   <main>
     {{if .Message}}<pre class="notice">{{.Message}}</pre>{{end}}
@@ -42,44 +47,66 @@ const pageHTML = `{{define "layout"}}
 
 {{define "setup"}}
 <section class="panel narrow">
-  <h1>Setup</h1>
+  <h1>{{tr .Lang "Setup"}}</h1>
   <form method="post" action="/setup">
-    <label>Setup key<input name="setup_key" type="password" autocomplete="one-time-code" required></label>
-    <label>Username<input name="username" autocomplete="username" required></label>
-    <label>Password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
-    <button type="submit">Create admin</button>
+    <label>{{tr .Lang "setup_key"}}<input name="setup_key" type="password" autocomplete="one-time-code" required></label>
+    <label>{{tr .Lang "username"}}<input name="username" autocomplete="username" required></label>
+    <label>{{tr .Lang "password"}}<input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
+    <button type="submit">{{tr .Lang "create_admin"}}</button>
   </form>
 </section>
 {{end}}
 
 {{define "login"}}
 <section class="panel narrow">
-  <h1>Login</h1>
+  <h1>{{tr .Lang "Login"}}</h1>
   <form method="post" action="/login">
-    <label>Username<input name="username" autocomplete="username" required></label>
-    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-    <button type="submit">Login</button>
+    <label>{{tr .Lang "username"}}<input name="username" autocomplete="username" required></label>
+    <label>{{tr .Lang "password"}}<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">{{tr .Lang "login"}}</button>
   </form>
 </section>
 {{end}}
 
 {{define "dashboard"}}
-<section class="grid">
+<section class="grid flow-grid">
   <div class="panel">
-    <h1>Dashboard</h1>
+    <h1>{{tr .Lang "setup_flow"}}</h1>
+    <div class="next">
+      <div>
+        <span class="eyebrow">{{tr .Lang "next_step"}}</span>
+        <strong>{{tr .Lang .NextStep.Title}}</strong>
+      </div>
+      <a class="link-button" href="{{.NextStep.URL}}">{{tr .Lang "open"}}</a>
+    </div>
+    <div class="steps">
+      {{range .Steps}}
+      <div class="step {{.State}}">
+        <div>
+          <strong>{{tr $.Lang .Title}}</strong>
+          <span>{{.Detail}}</span>
+        </div>
+        <span class="badge">{{state $.Lang .State}}</span>
+        <a href="{{.URL}}">{{tr $.Lang "open"}}</a>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  <div class="panel">
+    <h2>{{tr .Lang "status"}}</h2>
     <table>
-      <tr><th>Env</th><td>{{.EnvPath}}</td></tr>
-      <tr><th>Domain</th><td>{{.Config.Domain}}</td></tr>
-      <tr><th>Control</th><td>{{.Config.ControlHost}}:{{port .Config.TunnelAddr}}</td></tr>
-      <tr><th>Service</th><td><span class="badge">{{.Service.State}}</span></td></tr>
-      <tr><th>Certificate</th><td>{{if .Cert.Error}}{{.Cert.Error}}{{else}}{{.Cert.NotAfter}}{{end}}</td></tr>
+      <tr><th>{{tr .Lang "env"}}</th><td>{{.EnvPath}}</td></tr>
+      <tr><th>{{tr .Lang "domain"}}</th><td>{{.Config.Domain}}</td></tr>
+      <tr><th>{{tr .Lang "control"}}</th><td>{{.Config.ControlHost}}:{{port .Config.TunnelAddr}}</td></tr>
+      <tr><th>{{tr .Lang "service"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
+      <tr><th>{{tr .Lang "certificate"}}</th><td>{{if .Cert.Error}}{{.Cert.Error}}{{else}}{{.Cert.NotAfter}}{{end}}</td></tr>
     </table>
   </div>
   <div class="panel">
-    <h2>Checks</h2>
+    <h2>{{tr .Lang "checks"}}</h2>
     <table>
       {{range .Checks}}
-      <tr><th>{{.Name}}</th><td><span class="badge">{{.State}}</span></td><td>{{.Detail}}</td></tr>
+      <tr><th>{{tr $.Lang .Name}}</th><td><span class="badge">{{state $.Lang .State}}</span></td><td>{{.Detail}}</td></tr>
       {{end}}
     </table>
   </div>
@@ -88,22 +115,22 @@ const pageHTML = `{{define "layout"}}
 
 {{define "config"}}
 <section class="panel">
-  <h1>Config</h1>
+  <h1>{{tr .Lang "Config"}}</h1>
   <form method="post" action="/config" class="form-grid">
-    <label>Domain<input name="domain" value="{{.Config.Domain}}" required></label>
-    <label>Control host<input name="control_host" value="{{.Config.ControlHost}}" required></label>
-    <label>TLS cert<input name="tls_crt" value="{{.Config.TLSCrt}}" required></label>
-    <label>TLS key<input name="tls_key" value="{{.Config.TLSKey}}" required></label>
-    <label>Auth token<input name="auth_token" value="{{.Config.AuthToken}}"></label>
-    <label>HTTP addr<input name="http_addr" value="{{.Config.HTTPAddr}}"></label>
-    <label>HTTPS addr<input name="https_addr" value="{{.Config.HTTPSAddr}}"></label>
-    <label>Tunnel addr<input name="tunnel_addr" value="{{.Config.TunnelAddr}}"></label>
-    <label>Log level<input name="log_level" value="{{.Config.LogLevel}}"></label>
-    <label>Max connections<input name="max_connections" value="{{.Config.MaxConnections}}"></label>
-    <label class="wide">Extra args<input name="extra_args" value="{{.Config.ExtraArgs}}"></label>
-    <label class="check"><input type="checkbox" name="new_token" value="1"> New token</label>
+    <label>{{tr .Lang "domain"}}<input name="domain" value="{{.Config.Domain}}" required></label>
+    <label>{{tr .Lang "control_host"}}<input name="control_host" value="{{.Config.ControlHost}}" required></label>
+    <label>{{tr .Lang "tls_cert"}}<input name="tls_crt" value="{{.Config.TLSCrt}}" required></label>
+    <label>{{tr .Lang "tls_key"}}<input name="tls_key" value="{{.Config.TLSKey}}" required></label>
+    <label>{{tr .Lang "auth_token"}}<input name="auth_token" value="{{.Config.AuthToken}}"></label>
+    <label>{{tr .Lang "http_addr"}}<input name="http_addr" value="{{.Config.HTTPAddr}}"></label>
+    <label>{{tr .Lang "https_addr"}}<input name="https_addr" value="{{.Config.HTTPSAddr}}"></label>
+    <label>{{tr .Lang "tunnel_addr"}}<input name="tunnel_addr" value="{{.Config.TunnelAddr}}"></label>
+    <label>{{tr .Lang "log_level"}}<input name="log_level" value="{{.Config.LogLevel}}"></label>
+    <label>{{tr .Lang "max_connections"}}<input name="max_connections" value="{{.Config.MaxConnections}}"></label>
+    <label class="wide">{{tr .Lang "extra_args"}}<input name="extra_args" value="{{.Config.ExtraArgs}}"></label>
+    <label class="check"><input type="checkbox" name="new_token" value="1"> {{tr .Lang "new_token"}}</label>
     <div class="actions wide">
-      <button type="submit">Save</button>
+      <button type="submit">{{tr .Lang "save"}}</button>
     </div>
   </form>
 </section>
@@ -112,24 +139,24 @@ const pageHTML = `{{define "layout"}}
 {{define "certificate"}}
 <section class="grid">
   <div class="panel">
-    <h1>Certificate</h1>
+    <h1>{{tr .Lang "Certificate"}}</h1>
     <table>
-      <tr><th>Path</th><td>{{.Cert.Path}}</td></tr>
-      <tr><th>Subject</th><td>{{.Cert.Subject}}</td></tr>
-      <tr><th>Issuer</th><td>{{.Cert.Issuer}}</td></tr>
-      <tr><th>Expires</th><td>{{.Cert.NotAfter}}</td></tr>
-      <tr><th>Domain</th><td><span class="badge">{{.Cert.DomainOK}}</span></td></tr>
-      <tr><th>Wildcard</th><td><span class="badge">{{.Cert.WildcardOK}}</span></td></tr>
-      <tr><th>Names</th><td>{{.Cert.DNSNames}}</td></tr>
+      <tr><th>{{tr .Lang "path"}}</th><td>{{.Cert.Path}}</td></tr>
+      <tr><th>{{tr .Lang "subject"}}</th><td>{{.Cert.Subject}}</td></tr>
+      <tr><th>{{tr .Lang "issuer"}}</th><td>{{.Cert.Issuer}}</td></tr>
+      <tr><th>{{tr .Lang "expires"}}</th><td>{{.Cert.NotAfter}}</td></tr>
+      <tr><th>{{tr .Lang "domain"}}</th><td><span class="badge">{{state .Lang .Cert.DomainOK}}</span></td></tr>
+      <tr><th>{{tr .Lang "wildcard"}}</th><td><span class="badge">{{state .Lang .Cert.WildcardOK}}</span></td></tr>
+      <tr><th>{{tr .Lang "names"}}</th><td>{{.Cert.DNSNames}}</td></tr>
     </table>
   </div>
   <div class="panel">
     <h2>ACME</h2>
     <form method="post" action="/certificate/issue">
-      <label>DNS plugin<input name="dns_plugin" placeholder="dns_cf" required></label>
-      <label>Email<input name="account_email" type="email"></label>
-      <label>Env<textarea name="env_vars" rows="7" spellcheck="false" placeholder="CF_Token=..."></textarea></label>
-      <button type="submit">Issue</button>
+      <label>{{tr .Lang "dns_plugin"}}<input name="dns_plugin" placeholder="dns_cf" required></label>
+      <label>{{tr .Lang "email"}}<input name="account_email" type="email"></label>
+      <label>{{tr .Lang "env_vars"}}<textarea name="env_vars" rows="7" spellcheck="false" placeholder="CF_Token=..."></textarea></label>
+      <button type="submit">{{tr .Lang "issue"}}</button>
     </form>
   </div>
 </section>
@@ -139,12 +166,12 @@ const pageHTML = `{{define "layout"}}
 <section class="panel">
   <h1>Nginx</h1>
   <form method="post" action="/nginx">
-    <label>Path<input name="path" value="{{.NginxPath}}"></label>
-    <label>Config<textarea rows="24" spellcheck="false" readonly>{{.NginxConfig}}</textarea></label>
+    <label>{{tr .Lang "path"}}<input name="path" value="{{.NginxPath}}"></label>
+    <label>{{tr .Lang "config"}}<textarea rows="24" spellcheck="false" readonly>{{.NginxConfig}}</textarea></label>
     <div class="actions">
-      <button name="action" value="write" type="submit">Write</button>
-      <button name="action" value="test" type="submit">Test</button>
-      <button name="action" value="reload" type="submit">Reload</button>
+      <button name="action" value="write" type="submit">{{tr .Lang "write"}}</button>
+      <button name="action" value="test" type="submit">{{tr .Lang "test"}}</button>
+      <button name="action" value="reload" type="submit">{{tr .Lang "reload"}}</button>
     </div>
   </form>
 </section>
@@ -153,20 +180,20 @@ const pageHTML = `{{define "layout"}}
 {{define "service"}}
 <section class="grid">
   <div class="panel">
-    <h1>Service</h1>
+    <h1>{{tr .Lang "Service"}}</h1>
     <table>
-      <tr><th>Name</th><td>ngrokd</td></tr>
-      <tr><th>State</th><td><span class="badge">{{.Service.State}}</span></td></tr>
-      <tr><th>Error</th><td>{{.Service.Error}}</td></tr>
+      <tr><th>{{tr .Lang "name"}}</th><td>ngrokd</td></tr>
+      <tr><th>{{tr .Lang "state"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
+      <tr><th>{{tr .Lang "error"}}</th><td>{{.Service.Error}}</td></tr>
     </table>
     <form method="post" action="/service" class="actions">
-      <button name="action" value="start" type="submit">Start</button>
-      <button name="action" value="restart" type="submit">Restart</button>
-      <button name="action" value="stop" type="submit">Stop</button>
+      <button name="action" value="start" type="submit">{{tr .Lang "start"}}</button>
+      <button name="action" value="restart" type="submit">{{tr .Lang "restart"}}</button>
+      <button name="action" value="stop" type="submit">{{tr .Lang "stop"}}</button>
     </form>
   </div>
   <div class="panel">
-    <h2>Logs</h2>
+    <h2>{{tr .Lang "logs"}}</h2>
     <pre class="logs">{{.Service.Logs}}</pre>
   </div>
 </section>
@@ -174,11 +201,11 @@ const pageHTML = `{{define "layout"}}
 
 {{define "client"}}
 <section class="panel">
-  <h1>Client</h1>
+  <h1>{{tr .Lang "Client"}}</h1>
   <form method="post" action="/client">
-    <label>Path<input value="{{.ClientPath}}" readonly></label>
-    <label>Config<textarea rows="16" spellcheck="false" readonly>{{.ClientConfig}}</textarea></label>
-    <button type="submit">Write</button>
+    <label>{{tr .Lang "path"}}<input value="{{.ClientPath}}" readonly></label>
+    <label>{{tr .Lang "config"}}<textarea rows="16" spellcheck="false" readonly>{{.ClientConfig}}</textarea></label>
+    <button type="submit">{{tr .Lang "write"}}</button>
   </form>
 </section>
 {{end}}
@@ -226,6 +253,19 @@ nav a {
   text-decoration: none;
 }
 nav a:hover { color: var(--accent); }
+.language {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.language a {
+  color: var(--muted);
+  text-decoration: none;
+}
+.language a:hover { color: var(--accent); }
 main {
   width: min(1180px, calc(100vw - 32px));
   margin: 28px auto;
@@ -240,6 +280,9 @@ h2 { font-size: 18px; }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
+}
+.flow-grid {
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
 }
 .panel {
   background: var(--panel);
@@ -295,10 +338,72 @@ button {
   cursor: pointer;
 }
 button:hover { filter: brightness(0.95); }
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 1px solid #195bc2;
+  border-radius: 6px;
+  padding: 9px 13px;
+  color: #fff;
+  background: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
 .actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+.next {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.next strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 18px;
+}
+.eyebrow {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.steps {
+  display: grid;
+  gap: 10px;
+}
+.step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.step:last-child { border-bottom: 0; }
+.step strong {
+  display: block;
+  margin-bottom: 3px;
+}
+.step span:not(.badge) {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.step a {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
 }
 table {
   width: 100%;
@@ -350,6 +455,8 @@ th {
 @media (max-width: 800px) {
   .top { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
   .grid, .form-grid { grid-template-columns: 1fr; }
+  .language { margin-left: 0; }
+  .step { grid-template-columns: 1fr; }
   main { width: min(100vw - 20px, 1180px); margin-top: 16px; }
   .panel { padding: 16px; }
 }
