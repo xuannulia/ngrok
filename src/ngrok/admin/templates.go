@@ -70,6 +70,13 @@ const pageHTML = `{{define "layout"}}
 {{define "dashboard"}}
 <section class="panel">
   <h1>{{tr .Lang "guide_title"}}</h1>
+  <div class="next">
+    <div>
+      <span class="eyebrow">{{tr .Lang "next_step"}}</span>
+      <strong>{{tr .Lang .NextStep.Title}}</strong>
+    </div>
+    <a class="link-button" href="{{.NextStep.URL}}">{{tr .Lang .NextStep.Action}}</a>
+  </div>
   <div class="deploy-steps">
     {{range .Steps}}
     <div class="deploy-step">
@@ -134,13 +141,29 @@ const pageHTML = `{{define "layout"}}
       </td>
       <td><span class="badge">{{state $.Lang .CertState}}</span> {{.CertDetail}}</td>
       <td>
-        <form method="post" action="/certificate/issue" class="table-form">
-          <input type="hidden" name="domain" value="{{.Domain}}">
-          <button type="submit">{{tr $.Lang "issue"}}</button>
-        </form>
+        <div class="table-actions">
+          <form method="post" action="/certificate/issue" class="table-form">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <button type="submit">{{tr $.Lang "issue"}}</button>
+          </form>
+          <form method="post" action="/certificate/domain/delete" class="table-form">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <button class="secondary" type="submit" onclick="return confirm('{{tr $.Lang "delete_confirm"}}')">{{tr $.Lang "delete"}}</button>
+          </form>
+        </div>
       </td>
     </tr>
     {{end}}
+  </table>
+  <table class="compact-table meta-table">
+    <tr>
+      <th>{{tr .Lang "cert_prerequisites"}}</th>
+      <td>
+        {{range .CertChecks}}
+        <span class="badge">{{state $.Lang .State}}</span> {{tr $.Lang .Name}}: {{.Detail}}<br>
+        {{end}}
+      </td>
+    </tr>
   </table>
   <table class="compact-table meta-table">
     <tr><th>{{tr .Lang "output_dir"}}</th><td>{{.CertDir}}</td></tr>
@@ -205,10 +228,12 @@ const pageHTML = `{{define "layout"}}
   <h1>{{tr .Lang "Service"}}</h1>
   <table>
     <tr><th>{{tr .Lang "name"}}</th><td>ngrokd</td></tr>
+    <tr><th>{{tr .Lang "service_unit"}}</th><td><span class="badge">{{state .Lang .Service.UnitState}}</span> {{.Service.UnitPath}}</td></tr>
     <tr><th>{{tr .Lang "state"}}</th><td><span class="badge">{{state .Lang .Service.State}}</span></td></tr>
     <tr><th>{{tr .Lang "error"}}</th><td>{{.Service.Error}}</td></tr>
   </table>
   <form method="post" action="/service" class="actions build-actions">
+    <button name="action" value="install" type="submit">{{tr .Lang "install_service"}}</button>
     <button name="action" value="start" type="submit">{{tr .Lang "start"}}</button>
     <button name="action" value="restart" type="submit">{{tr .Lang "restart"}}</button>
     <button name="action" value="stop" type="submit">{{tr .Lang "stop"}}</button>
@@ -415,6 +440,11 @@ button {
   cursor: pointer;
 }
 button:hover { filter: brightness(0.95); }
+button.secondary {
+  border-color: var(--line);
+  color: var(--text);
+  background: #fff;
+}
 .link-button {
   display: inline-flex;
   align-items: center;
@@ -452,6 +482,12 @@ button:hover { filter: brightness(0.95); }
 }
 .table-form {
   display: block;
+}
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .domain-table td:nth-child(2),
 .domain-table td:nth-child(3) {

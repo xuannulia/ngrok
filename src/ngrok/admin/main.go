@@ -55,6 +55,7 @@ type options struct {
 	nginxPath   string
 	workDir     string
 	certDir     string
+	publicIP    string
 	serviceName string
 	serverBin   string
 	timeout     time.Duration
@@ -104,9 +105,11 @@ type certStatus struct {
 }
 
 type serviceStatus struct {
-	State string
-	Error string
-	Logs  string
+	State     string
+	UnitState string
+	UnitPath  string
+	Error     string
+	Logs      string
 }
 
 type checkItem struct {
@@ -121,6 +124,13 @@ type domainCertRow struct {
 	WildcardDNS checkItem
 	CertState   string
 	CertDetail  string
+	Primary     bool
+}
+
+type nginxDomain struct {
+	Domain string
+	Cert   string
+	Key    string
 }
 
 type binaryItem struct {
@@ -165,6 +175,7 @@ type viewData struct {
 	Cert        certStatus
 	Service     serviceStatus
 	Checks      []checkItem
+	CertChecks  []checkItem
 	CertRows    []domainCertRow
 	Binaries    []binaryItem
 	Server      binaryItem
@@ -193,6 +204,7 @@ func Main() {
 	flag.StringVar(&opts.nginxPath, "nginx-conf", defaultNginxPath, "nginx config output path")
 	flag.StringVar(&opts.workDir, "work-dir", "", "project work directory")
 	flag.StringVar(&opts.certDir, "cert-dir", "", "certificate output directory")
+	flag.StringVar(&opts.publicIP, "public-ip", "", "public server IP for DNS guidance")
 	flag.StringVar(&opts.serviceName, "service", defaultServiceName, "systemd service name")
 	flag.StringVar(&opts.serverBin, "server-bin", defaultServerBin, "installed ngrokd binary path")
 	flag.DurationVar(&opts.timeout, "timeout", 90*time.Second, "command timeout")
@@ -248,6 +260,9 @@ func (o *options) applyDefaults() {
 	if o.certDir == "" {
 		o.certDir = filepath.Join(o.workDir, "certs")
 	}
+	if o.publicIP == "" {
+		o.publicIP = strings.TrimSpace(os.Getenv("NGROK_ADMIN_PUBLIC_IP"))
+	}
 }
 
 func detectWorkDir() string {
@@ -279,6 +294,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/config", a.handleConfig)
 	mux.HandleFunc("/certificate", a.handleCertificate)
 	mux.HandleFunc("/certificate/domain", a.handleCertificateDomain)
+	mux.HandleFunc("/certificate/domain/delete", a.handleCertificateDomainDelete)
 	mux.HandleFunc("/certificate/issue", a.handleCertificateIssue)
 	mux.HandleFunc("/nginx", a.handleNginx)
 	mux.HandleFunc("/build", a.handleBuild)
@@ -328,8 +344,8 @@ func (a *app) baseData(r *http.Request, title, page string) viewData {
 		CertDir:    a.opts.certDir,
 		EnvPath:    a.opts.envPath,
 		Addr:       a.opts.addr,
-		ServerIP:   displayServerIP(r),
-		DNSRecords: dnsRecordText(a.opts.envPath, cfg, displayServerIP(r)),
+		ServerIP:   displayServerIP(r, a.opts.publicIP),
+		DNSRecords: dnsRecordText(a.opts.envPath, cfg, displayServerIP(r, a.opts.publicIP)),
 		Now:        time.Now().Format(time.RFC3339),
 	}
 }
@@ -470,6 +486,7 @@ func (a *app) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	data := a.baseData(r, "Certificate", "certificate")
 	data.Cert = readCertStatus(data.Config)
+	data.CertChecks = acmeReadinessChecks(a.opts.certDir)
 	domains := configuredDomainList(a.opts.envPath, data.Config)
 	data.CertRows = domainCertRows(a.opts.certDir, domains, data.Config)
 	render(w, data)
@@ -484,17 +501,17 @@ func (a *app) handleCertificateDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		a.renderError(w, r, "Certificate", "certificate", err)
+		a.renderCertificateError(w, r, err)
 		return
 	}
 	domains := parseDomainInput(r.Form.Get("domain"))
 	if len(domains) != 1 {
-		a.renderError(w, r, "Certificate", "certificate", errors.New("domain is invalid"))
+		a.renderCertificateError(w, r, errors.New("domain is invalid"))
 		return
 	}
 	controlHosts := parseDomainInput(r.Form.Get("control_host"))
 	if rawControlHost := strings.TrimSpace(r.Form.Get("control_host")); rawControlHost != "" && len(controlHosts) != 1 {
-		a.renderError(w, r, "Certificate", "certificate", errors.New("control host is invalid"))
+		a.renderCertificateError(w, r, errors.New("control host is invalid"))
 		return
 	}
 	cfg := readServerConfig(a.opts.envPath)
@@ -514,10 +531,40 @@ func (a *app) handleCertificateDomain(w http.ResponseWriter, r *http.Request) {
 	allDomains = appendDomain(allDomains, domains[0])
 	cfg.VHost = strings.Join(allDomains, ",")
 	if err := writeServerConfig(a.opts.envPath, cfg); err != nil {
-		a.renderError(w, r, "Certificate", "certificate", err)
+		a.renderCertificateError(w, r, err)
 		return
 	}
 	http.Redirect(w, r, "/certificate?msg=domain_saved", http.StatusFound)
+}
+
+func (a *app) handleCertificateDomainDelete(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/certificate", http.StatusFound)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		a.renderCertificateError(w, r, err)
+		return
+	}
+	domains := parseDomainInput(r.Form.Get("domain"))
+	if len(domains) != 1 {
+		a.renderCertificateError(w, r, errors.New("domain is invalid"))
+		return
+	}
+	cfg := readServerConfig(a.opts.envPath)
+	cfg.applyDefaults()
+	if err := removeDomainFromConfig(&cfg, a.opts.envPath, a.opts.certDir, domains[0]); err != nil {
+		a.renderCertificateError(w, r, err)
+		return
+	}
+	if err := writeServerConfig(a.opts.envPath, cfg); err != nil {
+		a.renderCertificateError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/certificate?msg=domain_deleted", http.StatusFound)
 }
 
 func (a *app) handleCertificateIssue(w http.ResponseWriter, r *http.Request) {
@@ -529,20 +576,30 @@ func (a *app) handleCertificateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		a.renderError(w, r, "Certificate", "certificate", err)
+		a.renderCertificateError(w, r, err)
 		return
 	}
 	cfg := readServerConfig(a.opts.envPath)
 	cfg.applyDefaults()
 	domains := parseDomainInput(r.Form.Get("domain"))
 	if len(domains) != 1 {
-		a.renderError(w, r, "Certificate", "certificate", errors.New("domain is invalid"))
+		a.renderCertificateError(w, r, errors.New("domain is invalid"))
 		return
 	}
 	domain := domains[0]
+	if failed := firstFailedCheck(acmeReadinessChecks(a.opts.certDir)); failed != nil {
+		data := a.baseData(r, "Certificate", "certificate")
+		data.Cert = readCertStatus(data.Config)
+		data.CertChecks = acmeReadinessChecks(a.opts.certDir)
+		data.CertRows = domainCertRows(a.opts.certDir, configuredDomainList(a.opts.envPath, data.Config), data.Config)
+		data.Error = failed.Detail
+		render(w, data)
+		return
+	}
 	if failed := firstFailedCheck(domainDNSChecks([]string{domain})); failed != nil {
 		data := a.baseData(r, "Certificate", "certificate")
 		data.Cert = readCertStatus(data.Config)
+		data.CertChecks = acmeReadinessChecks(a.opts.certDir)
 		data.CertRows = domainCertRows(a.opts.certDir, configuredDomainList(a.opts.envPath, data.Config), data.Config)
 		data.Error = failed.Detail
 		render(w, data)
@@ -575,6 +632,7 @@ func (a *app) handleCertificateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	data := a.baseData(r, "Certificate", "certificate")
 	data.Cert = readCertStatus(data.Config)
+	data.CertChecks = acmeReadinessChecks(a.opts.certDir)
 	data.CertRows = domainCertRows(a.opts.certDir, configuredDomainList(a.opts.envPath, data.Config), data.Config)
 	data.Message = tail(out, 4000)
 	if err != nil {
@@ -603,7 +661,7 @@ func (a *app) handleNginx(w http.ResponseWriter, r *http.Request) {
 		var msg string
 		switch action {
 		case "write":
-			err = writeFileRoot(path, []byte(nginxConfig(cfg)), 0644)
+			err = writeFileRoot(path, []byte(desiredNginxConfig(a.opts, cfg)), 0644)
 			msg = "nginx config written"
 		case "test":
 			msg, err = runCommand(a.opts.timeout, nil, "nginx", "-t")
@@ -613,7 +671,7 @@ func (a *app) handleNginx(w http.ResponseWriter, r *http.Request) {
 			err = errors.New("unknown action")
 		}
 		data := a.baseData(r, "Nginx", "nginx")
-		data.NginxConfig = nginxConfig(cfg)
+		data.NginxConfig = desiredNginxConfig(a.opts, cfg)
 		data.NginxPath = path
 		data.Message = tail(msg, 4000)
 		if err != nil {
@@ -623,7 +681,7 @@ func (a *app) handleNginx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := a.baseData(r, "Nginx", "nginx")
-	data.NginxConfig = nginxConfig(cfg)
+	data.NginxConfig = desiredNginxConfig(a.opts, cfg)
 	render(w, data)
 }
 
@@ -688,11 +746,37 @@ func (a *app) installServerBinary() (string, error) {
 	if err := writeFileRoot(a.opts.serverBin, b, 0755); err != nil {
 		return "", err
 	}
+	unitOut, err := a.installServiceUnit()
+	if err != nil {
+		return unitOut, err
+	}
 	out, err := runCommand(a.opts.timeout, nil, "systemctl", "restart", a.opts.serviceName)
 	if strings.TrimSpace(out) == "" {
 		out = a.opts.serverBin + "\n"
 	}
-	return out, err
+	return strings.TrimSpace(unitOut) + "\n" + out, err
+}
+
+func (a *app) installServiceUnit() (string, error) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return "", errors.New("systemctl not found")
+	}
+	if _, err := os.Stat(a.opts.serverBin); err != nil {
+		return "", errors.New("server binary is not installed")
+	}
+	if _, err := os.Stat(a.opts.envPath); err != nil {
+		return "", errors.New("runtime settings are not saved")
+	}
+	unitPath := serviceUnitPath(a.opts.serviceName)
+	if err := writeFileRoot(unitPath, []byte(systemdServiceUnit(a.opts)), 0644); err != nil {
+		return "", err
+	}
+	out, err := runCommand(a.opts.timeout, nil, "systemctl", "daemon-reload")
+	msg := unitPath + "\n"
+	if strings.TrimSpace(out) != "" {
+		msg += out
+	}
+	return msg, err
 }
 
 func (a *app) handleService(w http.ResponseWriter, r *http.Request) {
@@ -708,6 +792,8 @@ func (a *app) handleService(w http.ResponseWriter, r *http.Request) {
 		var out string
 		var err error
 		switch action {
+		case "install":
+			out, err = a.installServiceUnit()
 		case "start":
 			out, err = runCommand(a.opts.timeout, nil, "systemctl", "enable", "--now", a.opts.serviceName)
 		case "restart":
@@ -770,6 +856,15 @@ func (a *app) renderError(w http.ResponseWriter, r *http.Request, title, page st
 func (a *app) renderErrorWithConfig(w http.ResponseWriter, r *http.Request, title, page string, err error, cfg serverConfig) {
 	data := a.baseData(r, title, page)
 	data.Config = cfg
+	data.Error = err.Error()
+	render(w, data)
+}
+
+func (a *app) renderCertificateError(w http.ResponseWriter, r *http.Request, err error) {
+	data := a.baseData(r, "Certificate", "certificate")
+	data.Cert = readCertStatus(data.Config)
+	data.CertChecks = acmeReadinessChecks(a.opts.certDir)
+	data.CertRows = domainCertRows(a.opts.certDir, configuredDomainList(a.opts.envPath, data.Config), data.Config)
 	data.Error = err.Error()
 	render(w, data)
 }
@@ -1151,8 +1246,15 @@ func readCertStatus(cfg serverConfig) certStatus {
 }
 
 func readServiceStatus(service string) serviceStatus {
+	unitPath := serviceUnitPath(service)
+	status := serviceStatus{UnitPath: unitPath}
+	if _, err := os.Stat(unitPath); err == nil {
+		status.UnitState = "ok"
+	} else {
+		status.UnitState = "missing"
+	}
 	out, err := exec.Command("systemctl", "is-active", service).CombinedOutput()
-	status := serviceStatus{State: strings.TrimSpace(string(out))}
+	status.State = strings.TrimSpace(string(out))
 	if err != nil {
 		if status.State == "" {
 			status.State = "unavailable"
@@ -1164,6 +1266,61 @@ func readServiceStatus(service string) serviceStatus {
 		status.Logs = string(logs)
 	}
 	return status
+}
+
+func serviceUnitPath(service string) string {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		service = defaultServiceName
+	}
+	if !strings.HasSuffix(service, ".service") {
+		service += ".service"
+	}
+	return filepath.Join("/etc/systemd/system", service)
+}
+
+func systemdServiceUnit(opts options) string {
+	return fmt.Sprintf(`[Unit]
+Description=ngrokd tunnel server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%s
+EnvironmentFile=%s
+ExecStart=%s \
+  -domain=${NGROKD_DOMAIN} \
+  -tlsCrt=${NGROKD_TLS_CRT} \
+  -tlsKey=${NGROKD_TLS_KEY} \
+  -authToken=${NGROKD_AUTH_TOKEN} \
+  -httpAddr=${NGROKD_HTTP_ADDR} \
+  -httpsAddr=${NGROKD_HTTPS_ADDR} \
+  -tunnelAddr=${NGROKD_TUNNEL_ADDR} \
+  -log=stdout \
+  -log-level=${NGROKD_LOG_LEVEL} \
+  -maxConnections=${NGROKD_MAX_CONNECTIONS} \
+  ${NGROKD_EXTRA_ARGS}
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+`, systemdArg(opts.workDir), systemdArg(opts.envPath), systemdArg(opts.serverBin))
+}
+
+func systemdArg(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return `""`
+	}
+	if strings.ContainsAny(value, " \t\n\"'") {
+		return strconv.Quote(value)
+	}
+	return value
 }
 
 func runChecks(cfg serverConfig, opts options, nginxPath string) []checkItem {
@@ -1181,6 +1338,8 @@ func runChecks(cfg serverConfig, opts options, nginxPath string) []checkItem {
 
 func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts options, nginxPath string) []setupStep {
 	cfg.applyDefaults()
+	domains := configuredDomainList(opts.envPath, cfg)
+	certRows := domainCertRows(opts.certDir, domains, cfg)
 	configState := "done"
 	configDetail := cfg.HTTPAddr + " / " + cfg.TunnelAddr
 	if _, err := os.Stat(opts.envPath); err != nil || cfg.AuthToken == "" || cfg.AuthToken == "change-me-long-random-token" {
@@ -1196,14 +1355,18 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 
 	certState := "done"
 	certDetail := cert.NotAfter
-	if defaultLikeDomain(cfg.Domain) || cert.Error != "" || cert.DomainOK != "ok" || cert.WildcardOK != "ok" {
+	if defaultLikeDomain(cfg.Domain) || cert.Error != "" || cfgCertificatesIncomplete(certRows) {
 		certState = "todo"
-		certDetail = cert.Path
+		if failed := firstFailedCheck(acmeReadinessChecks(opts.certDir)); failed != nil {
+			certDetail = failed.Detail
+		} else {
+			certDetail = cert.Path
+		}
 	}
 
 	nginxState := "done"
 	nginxDetail := nginxPath
-	if _, err := os.Stat(nginxPath); err != nil {
+	if !fileContentMatches(nginxPath, desiredNginxConfig(opts, cfg)) {
 		nginxState = "todo"
 	}
 
@@ -1225,8 +1388,11 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 
 	serviceState := "done"
 	serviceDetail := service.State
-	if service.State != "active" {
+	if service.UnitState != "ok" || service.State != "active" {
 		serviceState = "todo"
+		if service.UnitState != "ok" {
+			serviceDetail = service.UnitPath
+		}
 	}
 
 	downloadState := "done"
@@ -1238,7 +1404,7 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 	return []setupStep{
 		{Key: "step_config", Title: "deploy_step_basic", Help: "deploy_help_basic", Done: "deploy_done_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
 		{Key: "step_domain", Title: "deploy_step_domain", Help: "deploy_help_domain", Done: "deploy_done_domain", State: domainState, Detail: domainDetail, URL: "/certificate", Action: "open"},
-		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", Done: "deploy_done_dns", State: dnsStepState(cfg), Detail: dnsStepDetail(cfg), URL: "/", Action: "refresh_dns"},
+		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", Done: "deploy_done_dns", State: dnsStepState(opts.envPath, cfg), Detail: dnsStepDetail(opts.envPath, cfg), URL: "/", Action: "refresh_dns"},
 		{Key: "step_certificate", Title: "deploy_step_cert", Help: "deploy_help_cert", Done: "deploy_done_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
 		{Key: "step_nginx", Title: "deploy_step_nginx", Help: "deploy_help_nginx", Done: "deploy_done_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
 		{Key: "step_server_build", Title: "deploy_step_server_build", Help: "deploy_help_server_build", Done: "deploy_done_server_build", State: serverBuildState, Detail: serverBuildDetail, URL: "/build", Action: "open"},
@@ -1254,7 +1420,7 @@ func nextStep(steps []setupStep) setupStep {
 			return step
 		}
 	}
-	return setupStep{Key: "ready", Title: "Ready", State: "done", Detail: "", URL: "/build", Action: "Open"}
+	return setupStep{Key: "ready", Title: "Ready", State: "done", Detail: "", URL: "/build", Action: "open"}
 }
 
 func pathCheck(name, path string) checkItem {
@@ -1375,15 +1541,34 @@ func domainDNSChecks(domains []string) []checkItem {
 	return checks
 }
 
-func displayServerIP(r *http.Request) string {
+func displayServerIP(r *http.Request, override string) string {
+	if ip := publicIPString(override); ip != "" {
+		return ip
+	}
 	host := strings.TrimSpace(r.Host)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	host = strings.Trim(host, "[]")
-	ip := net.ParseIP(host)
-	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
-		return "<server-ip>"
+	if ip := publicIPString(host); ip != "" {
+		return ip
+	}
+	if host != "" {
+		if addrs, err := net.LookupHost(host); err == nil {
+			for _, addr := range addrs {
+				if ip := publicIPString(addr); ip != "" {
+					return ip
+				}
+			}
+		}
+	}
+	return "<server-ip>"
+}
+
+func publicIPString(value string) string {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || !ip.IsGlobalUnicast() {
+		return ""
 	}
 	return ip.String()
 }
@@ -1430,6 +1615,7 @@ func normalizeDNSRecordHost(host string) string {
 }
 
 func domainCertRows(certDir string, domains []string, cfg serverConfig) []domainCertRow {
+	cfg.applyDefaults()
 	rows := make([]domainCertRow, 0, len(domains))
 	for _, domain := range domains {
 		root := dnsCheck(domain, domain)
@@ -1442,16 +1628,80 @@ func domainCertRows(certDir string, domains []string, cfg serverConfig) []domain
 			WildcardDNS: wildcard,
 			CertState:   certState,
 			CertDetail:  certDetail,
+			Primary:     domain == normalizeDomain(cfg.Domain),
 		})
 	}
 	return rows
 }
 
-func dnsStepState(cfg serverConfig) string {
+func acmeReadinessChecks(certDir string) []checkItem {
+	var checks []checkItem
+	if bin, err := findAcmeSH(); err == nil {
+		checks = append(checks, checkItem{Name: "acme_sh", State: "ok", Detail: bin})
+	} else {
+		checks = append(checks, checkItem{Name: "acme_sh", State: "missing", Detail: err.Error()})
+	}
+	checks = append(checks, acmeDNSCredentialCheck(acmeDNSPlugin()))
+	return checks
+}
+
+func acmeDNSPlugin() string {
+	return firstNonEmpty(os.Getenv("NGROK_ADMIN_DNS_PLUGIN"), os.Getenv("ACME_DNS_PLUGIN"), "dns_cf")
+}
+
+func acmeDNSCredentialCheck(plugin string) checkItem {
+	plugin = strings.TrimSpace(plugin)
+	if plugin == "" {
+		return checkItem{Name: "dns_api", State: "missing", Detail: "DNS plugin is empty"}
+	}
+	switch plugin {
+	case "dns_cf":
+		if os.Getenv("CF_Token") != "" || (os.Getenv("CF_Key") != "" && os.Getenv("CF_Email") != "") {
+			return checkItem{Name: "dns_api", State: "ok", Detail: plugin}
+		}
+		return checkItem{Name: "dns_api", State: "missing", Detail: "dns_cf: set CF_Token or CF_Key + CF_Email"}
+	default:
+		if envTrue(os.Getenv("NGROK_ADMIN_DNS_READY")) || envTrue(os.Getenv("ACME_DNS_READY")) {
+			return checkItem{Name: "dns_api", State: "ok", Detail: plugin}
+		}
+		return checkItem{Name: "dns_api", State: "missing", Detail: plugin + ": set NGROK_ADMIN_DNS_READY=1 after configuring acme.sh DNS credentials"}
+	}
+}
+
+func cfgCertificatesIncomplete(rows []domainCertRow) bool {
+	if len(rows) == 0 {
+		return true
+	}
+	for _, row := range rows {
+		if row.CertState != "ok" {
+			return true
+		}
+	}
+	return false
+}
+
+func fileContentMatches(path, want string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return string(b) == want
+}
+
+func envTrue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func dnsStepState(envPath string, cfg serverConfig) string {
 	if defaultLikeDomain(cfg.Domain) {
 		return "todo"
 	}
-	if firstFailedCheck(domainDNSChecks([]string{cfg.Domain})) != nil {
+	if firstFailedCheck(domainDNSChecks(configuredDomainList(envPath, cfg))) != nil {
 		return "todo"
 	}
 	if dnsCheck("control DNS", cfg.ControlHost).State != "ok" {
@@ -1460,13 +1710,22 @@ func dnsStepState(cfg serverConfig) string {
 	return "done"
 }
 
-func dnsStepDetail(cfg serverConfig) string {
+func dnsStepDetail(envPath string, cfg serverConfig) string {
 	if defaultLikeDomain(cfg.Domain) {
 		return cfg.Domain
 	}
+	if failed := firstFailedCheck(domainDNSChecks(configuredDomainList(envPath, cfg))); failed != nil {
+		return failed.Name + ": " + failed.Detail
+	}
 	control := dnsCheck("control DNS", cfg.ControlHost)
-	wildcard := dnsCheck("wildcard DNS", "probe-"+strconv.FormatInt(time.Now().Unix(), 10)+"."+cfg.Domain)
-	return control.Detail + " / " + wildcard.Detail
+	if control.State != "ok" {
+		return control.Detail
+	}
+	domains := configuredDomainList(envPath, cfg)
+	if len(domains) == 1 {
+		return domains[0] + " / " + cfg.ControlHost
+	}
+	return fmt.Sprintf("%d domains / %s", len(domains), cfg.ControlHost)
 }
 
 func domainSummary(envPath string, cfg serverConfig) string {
@@ -1504,6 +1763,57 @@ func appendDomain(domains []string, domain string) []string {
 		}
 	}
 	return append(domains, domain)
+}
+
+func removeDomainFromConfig(cfg *serverConfig, envPath, certDir, domain string) error {
+	domain = normalizeDomain(domain)
+	if domain == "" || !validDomainName(domain) {
+		return errors.New("domain is invalid")
+	}
+	current := configuredDomainList(envPath, *cfg)
+	var remaining []string
+	found := false
+	for _, item := range current {
+		if item == domain {
+			found = true
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	if !found {
+		return errors.New("domain not found")
+	}
+
+	cfg.ExtraArgs = removeDomainCertArg(cfg.ExtraArgs, domain)
+	if len(remaining) == 0 {
+		cfg.Domain = "example.com"
+		cfg.ControlHost = "ngrok.example.com"
+		cfg.TLSCrt = "/etc/ngrok/tls/fullchain.pem"
+		cfg.TLSKey = "/etc/ngrok/tls/privkey.pem"
+		cfg.ExtraArgs = ""
+		cfg.VHost = ""
+		cfg.applyDefaults()
+		return nil
+	}
+
+	if normalizeDomain(cfg.Domain) == domain || defaultLikeDomain(cfg.Domain) {
+		next := remaining[0]
+		cfg.Domain = next
+		if crt, key, ok := domainCertArgPaths(cfg.ExtraArgs, next); ok {
+			cfg.TLSCrt = crt
+			cfg.TLSKey = key
+			cfg.ExtraArgs = removeDomainCertArg(cfg.ExtraArgs, next)
+		} else {
+			cfg.TLSCrt = filepath.Join(domainCertDir(certDir, next), "fullchain.pem")
+			cfg.TLSKey = filepath.Join(domainCertDir(certDir, next), "privkey.pem")
+		}
+		controlHost := normalizeDomain(cfg.ControlHost)
+		if defaultLikeControlHost(cfg.ControlHost) || controlHost == domain || strings.HasSuffix(controlHost, "."+domain) {
+			cfg.ControlHost = "ngrok." + next
+		}
+	}
+	cfg.VHost = strings.Join(remaining, ",")
+	return nil
 }
 
 func domainCertDir(baseDir, domain string) string {
@@ -1704,7 +2014,7 @@ func issueWithAcmeSH(cfg serverConfig, domain, certDir string, timeout time.Dura
 	if domain == "" || !validDomainName(domain) {
 		return "", errors.New("domain is invalid")
 	}
-	dnsPlugin := firstNonEmpty(os.Getenv("NGROK_ADMIN_DNS_PLUGIN"), os.Getenv("ACME_DNS_PLUGIN"), "dns_cf")
+	dnsPlugin := acmeDNSPlugin()
 	if dnsPlugin == "" {
 		return "", errors.New("dns plugin is required")
 	}
@@ -1807,6 +2117,28 @@ func upsertDomainCertArg(extraArgs, domain, crtPath, keyPath string) string {
 	return strings.Join(filtered, " ")
 }
 
+func removeDomainCertArg(extraArgs, domain string) string {
+	prefix := normalizeDomain(domain) + ":"
+	fields := strings.Fields(extraArgs)
+	filtered := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		field := fields[i]
+		if field == "-domainCert" && i+1 < len(fields) {
+			if strings.HasPrefix(fields[i+1], prefix) {
+				i++
+				continue
+			}
+			filtered = append(filtered, field)
+			continue
+		}
+		if strings.HasPrefix(field, "-domainCert="+prefix) {
+			continue
+		}
+		filtered = append(filtered, field)
+	}
+	return strings.Join(filtered, " ")
+}
+
 func runCommand(timeout time.Duration, extraEnv []string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
@@ -1825,16 +2157,41 @@ func runCommand(timeout time.Duration, extraEnv []string, name string, args ...s
 	return string(out), nil
 }
 
-func nginxConfig(cfg serverConfig) string {
+func desiredNginxConfig(opts options, cfg serverConfig) string {
+	return nginxConfig(cfg, nginxDomains(opts.envPath, opts.certDir, cfg))
+}
+
+func nginxDomains(envPath, certDir string, cfg serverConfig) []nginxDomain {
 	cfg.applyDefaults()
-	return fmt.Sprintf(`map $http_upgrade $connection_upgrade {
+	domains := configuredDomainList(envPath, cfg)
+	if len(domains) == 0 {
+		domains = []string{cfg.Domain}
+	}
+	result := make([]nginxDomain, 0, len(domains))
+	for _, domain := range domains {
+		crt, key := certPathsForDomain(certDir, domain, cfg)
+		result = append(result, nginxDomain{Domain: domain, Cert: crt, Key: key})
+	}
+	return result
+}
+
+func nginxConfig(cfg serverConfig, domains []nginxDomain) string {
+	cfg.applyDefaults()
+	var b strings.Builder
+	b.WriteString(`map $http_upgrade $connection_upgrade {
     default upgrade;
     "" close;
 }
-
+`)
+	for _, item := range domains {
+		domain := normalizeDomain(item.Domain)
+		if domain == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf(`
 server {
     listen 80;
-    server_name *.%s;
+    server_name %s *.%s;
 
     client_max_body_size 0;
     proxy_request_buffering off;
@@ -1854,7 +2211,7 @@ server {
 server {
     listen 443 ssl;
     http2 on;
-    server_name *.%s;
+    server_name %s *.%s;
 
     ssl_certificate %s;
     ssl_certificate_key %s;
@@ -1873,7 +2230,9 @@ server {
         proxy_pass http://%s;
     }
 }
-`, cfg.Domain, cfg.HTTPAddr, cfg.Domain, cfg.TLSCrt, cfg.TLSKey, cfg.HTTPAddr)
+`, domain, domain, cfg.HTTPAddr, domain, domain, item.Cert, item.Key, cfg.HTTPAddr))
+	}
+	return b.String()
 }
 
 func clientConfig(cfg serverConfig) string {
