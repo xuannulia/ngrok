@@ -75,8 +75,9 @@ const pageHTML = `{{define "layout"}}
     <div class="deploy-step">
       <div class="deploy-step-main">
         <h2>{{tr $.Lang .Title}}</h2>
-        <p>{{tr $.Lang .Help}}</p>
+        <p class="step-line"><strong>{{tr $.Lang "deploy_action"}}</strong>{{tr $.Lang .Help}}</p>
         {{if eq .Key "step_dns"}}<pre class="snippet">{{$.DNSRecords}}</pre>{{end}}
+        <p class="step-line"><strong>{{tr $.Lang "deploy_done"}}</strong>{{tr $.Lang .Done}}</p>
         <div class="step-result"><span>{{tr $.Lang "current_result"}}</span>{{.Detail}}</div>
       </div>
       <div class="deploy-step-side">
@@ -325,10 +326,14 @@ h2 { font-size: 18px; }
 .deploy-step-main h2 {
   margin-bottom: 8px;
 }
-.deploy-step-main p {
+.step-line {
   margin: 0 0 10px;
   color: var(--muted);
-  font-weight: 600;
+}
+.step-line strong {
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--text);
 }
 .deploy-step-side {
   display: flex;
