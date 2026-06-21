@@ -1404,7 +1404,7 @@ func setupSteps(cfg serverConfig, cert certStatus, service serviceStatus, opts o
 	return []setupStep{
 		{Key: "step_config", Title: "deploy_step_basic", Help: "deploy_help_basic", Done: "deploy_done_basic", State: configState, Detail: configDetail, URL: "/config", Action: "open"},
 		{Key: "step_domain", Title: "deploy_step_domain", Help: "deploy_help_domain", Done: "deploy_done_domain", State: domainState, Detail: domainDetail, URL: "/certificate", Action: "open"},
-		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", Done: "deploy_done_dns", State: dnsStepState(opts.envPath, cfg), Detail: dnsStepDetail(opts.envPath, cfg), URL: "/", Action: "refresh_dns"},
+		{Key: "step_dns", Title: "deploy_step_dns", Help: "deploy_help_dns", Done: "deploy_done_dns", State: dnsStepState(opts.envPath, cfg), Detail: dnsStepDetail(opts.envPath, cfg), URL: "#step_dns", Action: "view_dns_records"},
 		{Key: "step_certificate", Title: "deploy_step_cert", Help: "deploy_help_cert", Done: "deploy_done_cert", State: certState, Detail: certDetail, URL: "/certificate", Action: "open"},
 		{Key: "step_nginx", Title: "deploy_step_nginx", Help: "deploy_help_nginx", Done: "deploy_done_nginx", State: nginxState, Detail: nginxDetail, URL: "/nginx", Action: "open"},
 		{Key: "step_server_build", Title: "deploy_step_server_build", Help: "deploy_help_server_build", Done: "deploy_done_server_build", State: serverBuildState, Detail: serverBuildDetail, URL: "/build", Action: "open"},

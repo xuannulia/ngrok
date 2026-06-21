@@ -75,11 +75,11 @@ const pageHTML = `{{define "layout"}}
       <span class="eyebrow">{{tr .Lang "next_step"}}</span>
       <strong>{{tr .Lang .NextStep.Title}}</strong>
     </div>
-    <a class="link-button" href="{{.NextStep.URL}}">{{tr .Lang .NextStep.Action}}</a>
+    <a href="{{.NextStep.URL}}">{{tr .Lang .NextStep.Action}}</a>
   </div>
   <div class="deploy-steps">
     {{range .Steps}}
-    <div class="deploy-step">
+    <div id="{{.Key}}" class="deploy-step">
       <div class="deploy-step-main">
         <h2>{{tr $.Lang .Title}}</h2>
         <p class="step-line"><strong>{{tr $.Lang "deploy_action"}}</strong>{{tr $.Lang .Help}}</p>
@@ -116,10 +116,10 @@ const pageHTML = `{{define "layout"}}
 <section class="panel">
   <h1>{{tr .Lang "Certificate"}}</h1>
   <div class="toolbar">
-    <form method="post" action="/certificate/domain" class="inline-form">
-      <input name="domain" placeholder="example.com" required>
-      <input name="control_host" placeholder="ngrok.example.com">
-      <button type="submit">{{tr .Lang "add_domain"}}</button>
+    <form method="post" action="/certificate/domain" class="inline-form domain-form">
+      <label class="inline-field"><span>{{tr .Lang "domain"}}</span><input name="domain" placeholder="domain.com" required></label>
+      <label class="inline-field"><span>{{tr .Lang "control_host"}}</span><input name="control_host" placeholder="ngrok.domain.com"></label>
+      <button type="submit">{{tr .Lang "save"}}</button>
     </form>
     <form method="get" action="/certificate" class="inline-form">
       <button type="submit">{{tr .Lang "refresh_dns"}}</button>
@@ -480,6 +480,18 @@ button.secondary {
 .inline-form input {
   width: min(320px, 72vw);
 }
+.domain-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(220px, 320px) auto;
+  align-items: end;
+}
+.inline-field {
+  display: grid;
+  gap: 6px;
+}
+.inline-field input {
+  width: 100%;
+}
 .table-form {
   display: block;
 }
@@ -524,15 +536,19 @@ button.secondary {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 16px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f8fafc;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
 .next strong {
   display: block;
   margin-top: 3px;
-  font-size: 18px;
+  font-size: 16px;
+}
+.next a {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
 }
 .eyebrow {
   color: var(--muted);
@@ -635,6 +651,7 @@ th {
   .setup-main { grid-template-columns: 1fr; }
   .deploy-step { grid-template-columns: 1fr; gap: 10px; }
   .deploy-step-side { justify-content: flex-start; }
+  .domain-form { grid-template-columns: 1fr; align-items: stretch; }
   .language { margin-left: 0; }
   .step { grid-template-columns: 1fr; }
   main { width: min(100vw - 20px, 1180px); margin-top: 16px; }
